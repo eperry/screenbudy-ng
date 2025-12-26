@@ -6,9 +6,5 @@
 *.ilk
 *.ini
 *VS.h
-*PS.h*.log
-temp.txt
-build_number.txt
-test_sharing/
-test_viewing/
-certs/
+*PS.h
+*.log
