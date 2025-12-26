@@ -1,0 +1,14 @@
+.vs
+*.exe
+*.pdb
+*.res
+*.obj
+*.ilk
+*.ini
+*VS.h
+*PS.h*.log
+temp.txt
+build_number.txt
+test_sharing/
+test_viewing/
+certs/
