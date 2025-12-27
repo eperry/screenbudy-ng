@@ -29,11 +29,8 @@
 #define BUDDY_TOSTRING(x) BUDDY_STRINGIFY(x)
 #define BUDDY_VERSION_STRING "Screen Buddy v" BUDDY_VERSION " (Build " BUDDY_TOSTRING(BUILD_NUMBER) ")"
 
-// Set to 1 to use local DERP server on localhost:80 (no external connection)
-// Set to 0 to use Tailscale's public DERP servers (default)
-// DERP Server Configuration
-// Set to 1 for local Docker DERP server (localhost:8080, plain HTTP)
-// Set to 0 for external DERP servers (internet, HTTPS)
+// DERP Server Configuration for local Docker
+// Using mmx233/derper image which supports plain HTTP (no TLS)
 #define DERPNET_USE_PLAIN_HTTP 1
 
 // Forward declare derpnet logging - will be redirected to our log system after windows.h
@@ -375,6 +372,7 @@ enum
 	BUDDY_DISCONNECT_TIMER		= 111,
 	BUDDY_UPDATE_TITLE_TIMER	= 222,
 	BUDDY_FILE_TIMER			= 333,
+	BUDDY_FRAME_TIMER			= 444,
 
 	// dialog controls
 	BUDDY_ID_SHARE_ICON			= 100,
@@ -484,6 +482,8 @@ typedef struct
 	// media stuff
 	IMFTransform* Converter;
 	IMFTransform* Codec;
+	MFT_OUTPUT_STREAM_INFO EncodeConverterInfo;
+	MFT_OUTPUT_STREAM_INFO DecodeConverterInfo;
 
 	// encoder stuff
 	IMFMediaEventGenerator* Generator;
@@ -517,6 +517,80 @@ typedef struct
 	wchar_t WindowFilter[256];
 }
 ScreenBuddy;
+
+static IMFMediaType* Buddy_CreateVideoType(const GUID* Subtype, UINT Width, UINT Height, UINT Fps)
+{
+	IMFMediaType* Type = NULL;
+	if (FAILED(MFCreateMediaType(&Type))) return NULL;
+	IMFMediaType_SetGUID(Type, &MF_MT_MAJOR_TYPE, &MFMediaType_Video);
+	IMFMediaType_SetGUID(Type, &MF_MT_SUBTYPE, Subtype);
+	IMFMediaType_SetUINT64(Type, &MF_MT_FRAME_SIZE, MF64(Width, Height));
+	IMFMediaType_SetUINT64(Type, &MF_MT_FRAME_RATE, MF64(Fps, 1));
+	IMFMediaType_SetUINT32(Type, &MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+	IMFMediaType_SetUINT32(Type, &MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_0_255);
+	IMFMediaType_SetUINT32(Type, &MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709);
+	IMFMediaType_SetUINT32(Type, &MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709);
+	IMFMediaType_SetUINT32(Type, &MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709);
+	return Type;
+}
+
+static bool Buddy_GetConverterOutput(IMFTransform* Transform, IMFVideoSampleAllocatorEx* Allocator, MFT_OUTPUT_STREAM_INFO* Info, DWORD SampleSize, const char* Label, MFT_OUTPUT_DATA_BUFFER* Output)
+{
+	(void)SampleSize;
+	for (int Attempt = 0; Attempt < 4; ++Attempt)
+	{
+		if (!Output->pSample && !(Info->dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES))
+		{
+			if (!Allocator)
+			{
+				LOG_ERROR("%s: no sample and converter does not provide samples", Label);
+				return false;
+			}
+			HRESULT hrAlloc = IMFVideoSampleAllocatorEx_AllocateSample(Allocator, &Output->pSample);
+			if (FAILED(hrAlloc))
+			{
+				LOG_ERROR("%s: AllocateSample failed: 0x%08X", Label, hrAlloc);
+				return false;
+			}
+		}
+
+		DWORD Status = 0;
+		HRESULT hr = IMFTransform_ProcessOutput(Transform, 0, 1, Output, &Status);
+		if (FAILED(hr))
+		{
+			LOG_ERROR("%s ProcessOutput failed: 0x%08X (status=0x%08X)", Label, hr, Status);
+			return false;
+		}
+		if (Status != 0)
+		{
+			LOG_DEBUG("%s ProcessOutput status: 0x%08X", Label, Status);
+		}
+
+		if (!Output->pSample)
+		{
+			LOG_ERROR("%s returned NULL sample", Label);
+			return false;
+		}
+
+		DWORD BufferCount = 0;
+		HRESULT hrCount = IMFSample_GetBufferCount(Output->pSample, &BufferCount);
+		if (SUCCEEDED(hrCount) && BufferCount > 0)
+		{
+			return true;
+		}
+
+		LOG_DEBUG("%s sample empty; retrying...", Label);
+		if (Output->pSample)
+		{
+			IMFSample_Release(Output->pSample);
+			Output->pSample = NULL;
+		}
+
+		// If converter provides samples, let it on next loop; if caller allocates, loop will re-allocate above
+	}
+
+	return false;
+}
 
 typedef struct
 {
@@ -1088,22 +1162,18 @@ static bool Buddy_CreateEncoder(ScreenBuddy* Buddy, int EncodeWidth, int EncodeH
 		ICodecAPI_Release(Codec);
 	}
 
-	IMFMediaType* InputType;
-	HR(MFCreateMediaType(&InputType));
-	HR(IMFMediaType_SetGUID(InputType, &MF_MT_MAJOR_TYPE, &MFMediaType_Video));
-	HR(IMFMediaType_SetGUID(InputType, &MF_MT_SUBTYPE, &MFVideoFormat_RGB32));
-	HR(IMFMediaType_SetUINT32(InputType, &MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive));
-	HR(IMFMediaType_SetUINT64(InputType, &MF_MT_FRAME_RATE, MF64(BUDDY_ENCODE_FRAMERATE, 1)));
-	HR(IMFMediaType_SetUINT64(InputType, &MF_MT_FRAME_SIZE, MF64(EncodeWidth, EncodeHeight)));
-
-	IMFMediaType* ConvertedType;
-	HR(MFCreateMediaType(&ConvertedType));
-	HR(IMFMediaType_SetGUID(ConvertedType, &MF_MT_MAJOR_TYPE, &MFMediaType_Video));
-	HR(IMFMediaType_SetGUID(ConvertedType, &MF_MT_SUBTYPE, &MFVideoFormat_NV12));
-	HR(IMFMediaType_SetUINT32(ConvertedType, &MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive));
-	HR(IMFMediaType_SetUINT64(ConvertedType, &MF_MT_FRAME_RATE, MF64(BUDDY_ENCODE_FRAMERATE, 1)));
-	HR(IMFMediaType_SetUINT64(ConvertedType, &MF_MT_FRAME_SIZE, MF64(EncodeWidth, EncodeHeight)));
-	// Note: Original code doesn't set MF_MT_PIXEL_ASPECT_RATIO or MF_MT_DEFAULT_STRIDE for ConvertedType
+	IMFMediaType* InputType = Buddy_CreateVideoType(&MFVideoFormat_RGB32, EncodeWidth, EncodeHeight, BUDDY_ENCODE_FRAMERATE);
+	IMFMediaType* ConvertedType = Buddy_CreateVideoType(&MFVideoFormat_NV12, EncodeWidth, EncodeHeight, BUDDY_ENCODE_FRAMERATE);
+	if (!InputType || !ConvertedType)
+	{
+		LOG_ERROR("Failed to create media types for encoder");
+		if (InputType) IMFMediaType_Release(InputType);
+		if (ConvertedType) IMFMediaType_Release(ConvertedType);
+		IMFTransform_Release(Converter);
+		IMFTransform_Release(Encoder);
+		IMFDXGIDeviceManager_Release(Manager);
+		return false;
+	}
 
 	IMFMediaType* OutputType;
 	HR(MFCreateMediaType(&OutputType));
@@ -1195,6 +1265,7 @@ static bool Buddy_CreateEncoder(ScreenBuddy* Buddy, int EncodeWidth, int EncodeH
 	// Check output stream info - validation only
 	MFT_OUTPUT_STREAM_INFO OutputInfo;
 	HR(IMFTransform_GetOutputStreamInfo(Converter, 0, &OutputInfo));
+	Buddy->EncodeConverterInfo = OutputInfo;
 	LOG_DEBUG("Converter OutputStreamInfo flags: 0x%08X (PROVIDES_SAMPLES=%s)", 
 		OutputInfo.dwFlags,
 		(OutputInfo.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) ? "yes" : "no");
@@ -1274,6 +1345,10 @@ static bool Buddy_ResetDecoder(IMFTransform* Decoder, IMFTransform* Converter)
 
 	HR(IMFTransform_SetOutputType(Decoder, 0, DecodedType, 0));
 	HR(IMFTransform_SetInputType(Converter, 0, DecodedType, 0));
+	IMFMediaType_SetUINT32(DecodedType, &MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_0_255);
+	IMFMediaType_SetUINT32(DecodedType, &MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709);
+	IMFMediaType_SetUINT32(DecodedType, &MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709);
+	IMFMediaType_SetUINT32(DecodedType, &MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709);
 
 	UINT64 FrameRate;
 	HR(IMFMediaType_GetUINT64(DecodedType, &MF_MT_FRAME_RATE, &FrameRate));
@@ -1281,13 +1356,12 @@ static bool Buddy_ResetDecoder(IMFTransform* Decoder, IMFTransform* Converter)
 	UINT64 FrameSize;
 	HR(IMFMediaType_GetUINT64(DecodedType, &MF_MT_FRAME_SIZE, &FrameSize));
 
-	IMFMediaType* OutputType;
-	HR(MFCreateMediaType(&OutputType));
-	HR(IMFMediaType_SetGUID(OutputType, &MF_MT_MAJOR_TYPE, &MFMediaType_Video));
-	HR(IMFMediaType_SetGUID(OutputType, &MF_MT_SUBTYPE, &MFVideoFormat_RGB32));
-	HR(IMFMediaType_SetUINT32(OutputType, &MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive));
-	HR(IMFMediaType_SetUINT64(OutputType, &MF_MT_FRAME_RATE, FrameRate));
-	HR(IMFMediaType_SetUINT64(OutputType, &MF_MT_FRAME_SIZE, FrameSize));
+	IMFMediaType* OutputType = Buddy_CreateVideoType(&MFVideoFormat_ARGB32, (UINT)(FrameSize >> 32), (UINT)(FrameSize & 0xFFFFFFFF), (UINT)(FrameRate >> 32));
+	if (!OutputType)
+	{
+		IMFMediaType_Release(DecodedType);
+		return false;
+	}
 	HR(IMFTransform_SetOutputType(Converter, 0, OutputType, 0));
 
 	IMFMediaType_Release(DecodedType);
@@ -1380,6 +1454,7 @@ static bool Buddy_CreateDecoder(ScreenBuddy* Buddy)
 	Assert(OutputInfo.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES);
 
 	HR(IMFTransform_GetOutputStreamInfo(Converter, 0, &OutputInfo));
+	Buddy->DecodeConverterInfo = OutputInfo;
 	Assert((OutputInfo.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) == 0);
 
 	HR(IMFTransform_ProcessMessage(Decoder, MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0));
@@ -1648,7 +1723,11 @@ static void Buddy_Decode(ScreenBuddy* Buddy, IMFMediaBuffer* InputBuffer)
 		IMFSample_Release(DecodedSample);
 
 		MFT_OUTPUT_DATA_BUFFER ConverterOutput = { .pSample = Buddy->DecodeOutputSample };
-		HR(IMFTransform_ProcessOutput(Buddy->Converter, 0, 1, &ConverterOutput, &Status));
+		if (!Buddy_GetConverterOutput(Buddy->Converter, NULL, &Buddy->DecodeConverterInfo,
+			Buddy->InputWidth * Buddy->InputHeight * 4, "Decode Converter", &ConverterOutput))
+		{
+			break;
+		}
 
 		NewFrameDecoded = true;
 		Buddy->InputMipsGenerated = false;
@@ -1699,11 +1778,18 @@ static void Buddy_OnFrameCapture(ScreenCapture* Capture, bool Closed)
 			return;
 		}
 		
-		// Check if window is minimized
+		// Check if window is minimized - Windows Graphics Capture doesn't produce frames for minimized windows
 		if (IsIconic(Buddy->SelectedWindow))
 		{
-			// Window is minimized, we can still capture but might want to pause or show message
-			// For now, continue capturing (will show last frame or black screen depending on OS)
+			// Automatically restore the minimized window so capture can continue
+			static bool s_RestoreLogged = false;
+			if (!s_RestoreLogged)
+			{
+				LOG_INFO("Captured window is minimized - restoring it automatically");
+				s_RestoreLogged = true;
+			}
+			ShowWindow(Buddy->SelectedWindow, SW_RESTORE);
+			return; // Skip this frame, next callback will capture the restored window
 		}
 	}
 
@@ -1843,17 +1929,16 @@ static void Buddy_OnFrameCapture(ScreenCapture* Capture, bool Closed)
 					return;
 				}
 
-				DWORD Status;
 				MFT_OUTPUT_DATA_BUFFER Output = { .pSample = ConvertedSample };
-				hr = IMFTransform_ProcessOutput(Buddy->Converter, 0, 1, &Output, &Status);
-				if (FAILED(hr))
+				if (!Buddy_GetConverterOutput(Buddy->Converter, Buddy->EncodeSampleAllocator, &Buddy->EncodeConverterInfo,
+				    Buddy->EncodeWidth * Buddy->EncodeHeight * 3 / 2, "Encode Converter", &Output))
 				{
-					LOG_ERROR("IMFTransform_ProcessOutput failed: 0x%08X", hr);
 					if (ConvertedSample) IMFSample_Release(ConvertedSample);
+					if (Output.pSample && Output.pSample != ConvertedSample) IMFSample_Release(Output.pSample);
 					ScreenCapture_ReleaseFrame(&Buddy->Capture, &Frame);
 					return;
 				}
-				
+
 				// If converter provided its own sample, use that instead
 				if (Output.pSample != ConvertedSample)
 				{
@@ -1890,8 +1975,6 @@ static void Buddy_OnFrameCapture(ScreenCapture* Capture, bool Closed)
 		ScreenCapture_ReleaseFrame(&Buddy->Capture, &Frame);
 	}
 }
-
-//
 
 void Buddy_ShowMessage(ScreenBuddy* Buddy, const wchar_t* Message)
 {
@@ -2222,6 +2305,7 @@ static void Buddy_StopSharing(ScreenBuddy* Buddy)
 {
 	if (Buddy->State == BUDDY_STATE_SHARING)
 	{
+		KillTimer(Buddy->DialogWindow, BUDDY_FRAME_TIMER);
 		ScreenCapture_Stop(&Buddy->Capture);
 		DragAcceptFiles(Buddy->DialogWindow, FALSE);
 	}
@@ -3038,6 +3122,21 @@ static bool Buddy_StartSharing(ScreenBuddy* Buddy)
 		int EncodeHeight = Buddy->Capture.Rect.bottom - Buddy->Capture.Rect.top;
 		LOG_INFO("Capture dimensions: %dx%d", EncodeWidth, EncodeHeight);
 
+		// H.264 requires dimensions to be multiples of 16 (macroblock size)
+		// Also enforce minimum resolution for hardware encoders (typically 64x64 or 128x128)
+		#define MIN_ENCODE_DIM 128
+		#define MACROBLOCK_SIZE 16
+		
+		// Ensure minimum dimensions
+		if (EncodeWidth < MIN_ENCODE_DIM) EncodeWidth = MIN_ENCODE_DIM;
+		if (EncodeHeight < MIN_ENCODE_DIM) EncodeHeight = MIN_ENCODE_DIM;
+		
+		// Round up to next multiple of 16
+		EncodeWidth = (EncodeWidth + MACROBLOCK_SIZE - 1) & ~(MACROBLOCK_SIZE - 1);
+		EncodeHeight = (EncodeHeight + MACROBLOCK_SIZE - 1) & ~(MACROBLOCK_SIZE - 1);
+		
+		LOG_INFO("Encoder dimensions (aligned): %dx%d", EncodeWidth, EncodeHeight);
+
 		if (Buddy_CreateEncoder(Buddy, EncodeWidth, EncodeHeight))
 		{
 			LOG_INFO("Video encoder created successfully");
@@ -3045,7 +3144,7 @@ static bool Buddy_StartSharing(ScreenBuddy* Buddy)
 			char DerpHostName[256];
 			if (DERPNET_USE_PLAIN_HTTP)
 			{
-				lstrcpyA(DerpHostName, "localhost");
+				lstrcpyA(DerpHostName, "127.0.0.1");
 			}
 			else
 			{
@@ -3151,7 +3250,7 @@ static bool Buddy_StartConnection(ScreenBuddy* Buddy)
 	char DerpHostName[256];
 	if (DERPNET_USE_PLAIN_HTTP)
 	{
-		lstrcpyA(DerpHostName, "localhost");
+		lstrcpyA(DerpHostName, "127.0.0.1");
 	}
 	else
 	{
@@ -3388,6 +3487,9 @@ static void Buddy_NetworkEvent(ScreenBuddy* Buddy)
 
 				// Enable file transfer from sharing side
 				DragAcceptFiles(Buddy->DialogWindow, TRUE);
+
+				// Start frame capture timer (30fps = ~33ms)
+				SetTimer(Buddy->DialogWindow, BUDDY_FRAME_TIMER, 33, NULL);
 
 				Buddy_UpdateState(Buddy, BUDDY_STATE_SHARING);
 				LOG_INFO("State updated to SHARING - Now streaming video!");
@@ -3770,6 +3872,14 @@ static INT_PTR CALLBACK Buddy_DialogProc(HWND Dialog, UINT Message, WPARAM WPara
 					Buddy->FileLastTime = TimeNow.QuadPart;
 					Buddy->FileLastSize = Buddy->FileProgress;
 				}
+			}
+		}
+		else if (WParam == BUDDY_FRAME_TIMER)
+		{
+			// Poll for frames when sharing
+			if (Buddy->State == BUDDY_STATE_SHARING)
+			{
+				Buddy_OnFrameCapture(&Buddy->Capture, false);
 			}
 		}
 		return TRUE;
