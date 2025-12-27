@@ -11,6 +11,9 @@ where /Q cl.exe || (
   call "!VS!\VC\Auxiliary\Build\vcvarsall.bat" amd64 || exit /b 1
 )
 
+REM Create dist directory
+if not exist dist mkdir dist
+
 REM Increment build number
 if not exist build_number.txt echo 1 > build_number.txt
 set /p BUILD_NUM=<build_number.txt
@@ -31,16 +34,45 @@ fxc.exe /nologo /T ps_5_0 /E PS /O3 /WX /Ges /Fh ScreenBuddyPS.h /Vn ScreenBuddy
 
 rc.exe /nologo ScreenBuddy.rc || exit /b 1
 echo Compiling with flags: %CL%
-cl.exe /nologo /W3 /WX ScreenBuddy.c ScreenBuddy.res /link /INCREMENTAL:NO /MANIFEST:EMBED /MANIFESTINPUT:ScreenBuddy.manifest /SUBSYSTEM:WINDOWS /FIXED /merge:_RDATA=.rdata || exit /b 1
-del *.obj *.res >nul
+cl.exe /nologo /W3 /WX ScreenBuddy.c ScreenBuddy.res /link /INCREMENTAL:NO /MANIFEST:EMBED /MANIFESTINPUT:ScreenBuddy.manifest /SUBSYSTEM:WINDOWS /FIXED /merge:_RDATA=.rdata /OUT:dist\ScreenBuddy.exe || exit /b 1
+
+REM Clean up build artifacts
+del *.obj *.res >nul 2>&1
+
+REM Copy additional files to dist
+copy /Y ScreenBuddy.ini dist\ >nul 2>&1
 
 echo.
 echo ========================================
-echo   Running Unit Tests
+echo Build successful! Output in dist\
 echo ========================================
-call run_tests.cmd
-if errorlevel 1 (
+echo   dist\ScreenBuddy.exe
+echo   dist\ScreenBuddy.ini
+echo.
+
+REM Run unit tests if requested or by default
+if "%1" neq "notest" (
+    echo ========================================
+    echo   Running System Validation Tests
+    echo ========================================
+    call tests\run_tests.cmd
+    if errorlevel 1 (
+        echo.
+        echo WARNING: System validation tests failed
+        exit /b 1
+    )
+    
     echo.
-    echo WARNING: Tests failed but build succeeded
-    echo.
+    echo ========================================
+    echo   Running C Unit Tests
+    echo ========================================
+    pushd tests
+    call run_all_tests.cmd
+    set TEST_RESULT=!ERRORLEVEL!
+    popd
+    if !TEST_RESULT! neq 0 (
+        echo.
+        echo WARNING: C unit tests failed
+        exit /b 1
+    )
 )

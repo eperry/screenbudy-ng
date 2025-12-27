@@ -4,6 +4,11 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+// Set to 1 to skip TLS certificate validation (for self-signed certs in local Docker)
+#ifndef DERPNET_SKIP_CERT_VALIDATION
+#define DERPNET_SKIP_CERT_VALIDATION 0
+#endif
+
 #ifndef DERPNET_API
 #	ifdef DERPNET_STATIC
 #		define DERPNET_API static inline
@@ -115,13 +120,17 @@ DERPNET_API bool DerpNet_SendEx(DerpNet* Net, const DerpKey* TargetUserPublicKey
 #	define rol32(x, n) ( ((x) << (n)) | ((x) >> (32-(n))) )
 #endif
 
-// Use ScreenBuddy's logging system if available, otherwise fallback
+// Use ScreenBuddy's logging system if available, otherwise fallback to printf
 #ifdef LOG_DERP
 #	define DERPNET_ASSERT(cond) do { if (!(cond)) { LOG_ERROR("DERP ASSERT FAILED: %s", #cond); __debugbreak(); } } while (0)
 #	define DERPNET_LOG(...) LOG_DERP(__VA_ARGS__)
 #else
+// Always log to file by opening/appending to derp_debug.log
 #	define DERPNET_ASSERT(cond) do { if (!(cond)) __debugbreak(); } while (0)
-#	define DERPNET_LOG(...) do { printf("DERP: " __VA_ARGS__); printf("\n"); fflush(stdout); } while (0)
+#	define DERPNET_LOG(...) do { \
+		FILE* _f = fopen("derp_debug.log", "a"); \
+		if (_f) { fprintf(_f, "[DERP] " __VA_ARGS__); fprintf(_f, "\n"); fclose(_f); } \
+	} while (0)
 #endif
 
 static inline uint32_t Get32LE(const uint8_t* Buffer)
@@ -977,13 +986,29 @@ void DerpNet_GetPublicKey(const DerpKey* UserSecret, DerpKey* UserPublic)
 
 static bool DerpNet__TlsHandshake(DerpNet* Net, const char* Hostname, CredHandle* CredentialHandle, CtxtHandle* ContextHandle)
 {
+	DERPNET_LOG("TLS Handshake starting for host: %s", Hostname);
+#if DERPNET_SKIP_CERT_VALIDATION
+	DERPNET_LOG("TLS: Certificate validation DISABLED (DERPNET_SKIP_CERT_VALIDATION=1)");
+#else
+	DERPNET_LOG("TLS: Certificate validation ENABLED");
+#endif
+
 	SCHANNEL_CRED Cred = { 0 };
 	Cred.dwVersion = SCHANNEL_CRED_VERSION;
+#if DERPNET_SKIP_CERT_VALIDATION
+	// Skip certificate validation for self-signed certs (local Docker DERP)
+	Cred.dwFlags = SCH_USE_STRONG_CRYPTO | SCH_CRED_MANUAL_CRED_VALIDATION | SCH_CRED_NO_DEFAULT_CREDS;
+#else
 	Cred.dwFlags = SCH_USE_STRONG_CRYPTO | SCH_CRED_AUTO_CRED_VALIDATION | SCH_CRED_NO_DEFAULT_CREDS;
+#endif
 	Cred.grbitEnabledProtocols = SP_PROT_TLS1_2;
 
 	SECURITY_STATUS SecStatus = AcquireCredentialsHandleA(NULL, UNISP_NAME_A, SECPKG_CRED_OUTBOUND, NULL, &Cred, NULL, NULL, CredentialHandle, NULL);
-	DERPNET_ASSERT(SecStatus == SEC_E_OK);
+	if (SecStatus != SEC_E_OK) {
+		DERPNET_LOG("TLS: AcquireCredentialsHandle FAILED with error 0x%08X", SecStatus);
+		return false;
+	}
+	DERPNET_LOG("TLS: AcquireCredentialsHandle succeeded");
 
 	CtxtHandle* Context = NULL;
 
@@ -1029,15 +1054,17 @@ static bool DerpNet__TlsHandshake(DerpNet* Net, const char* Hostname, CredHandle
 
 		if (SecStatus == SEC_E_OK)
 		{
+			DERPNET_LOG("TLS: Handshake completed successfully!");
 			return true;
 		}
 		else if (SecStatus == SEC_I_INCOMPLETE_CREDENTIALS)
 		{
-			DERPNET_LOG("server asks for client certificate, not expected here");
+			DERPNET_LOG("TLS ERROR: server asks for client certificate, not expected here");
 			return false;
 		}
 		else if (SecStatus == SEC_I_CONTINUE_NEEDED)
 		{
+			DERPNET_LOG("TLS: Continue needed, sending %u bytes", OutBuffers[0].cbBuffer);
 			char* OutBuffer = OutBuffers[0].pvBuffer;
 			int OutSize = OutBuffers[0].cbBuffer;
 
@@ -1058,7 +1085,18 @@ static bool DerpNet__TlsHandshake(DerpNet* Net, const char* Hostname, CredHandle
 		}
 		else if (SecStatus != SEC_E_INCOMPLETE_MESSAGE)
 		{
-			DERPNET_LOG("cannot verify server certificate, bad hostname, expired cert, or bad crypto handshake");
+			DERPNET_LOG("TLS ERROR: InitializeSecurityContext failed with status 0x%08X", SecStatus);
+			if (SecStatus == SEC_E_WRONG_PRINCIPAL) {
+				DERPNET_LOG("TLS ERROR: Certificate hostname mismatch");
+			} else if (SecStatus == SEC_E_UNTRUSTED_ROOT) {
+				DERPNET_LOG("TLS ERROR: Untrusted root certificate (self-signed?)");
+			} else if (SecStatus == SEC_E_CERT_EXPIRED) {
+				DERPNET_LOG("TLS ERROR: Certificate expired");
+			} else if (SecStatus == SEC_E_INVALID_TOKEN) {
+				DERPNET_LOG("TLS ERROR: Invalid token - server may not support TLS");
+			} else if (SecStatus == SEC_E_ALGORITHM_MISMATCH) {
+				DERPNET_LOG("TLS ERROR: Algorithm mismatch");
+			}
 			return false;
 		}
 
@@ -1457,7 +1495,7 @@ bool DerpNet_Open(DerpNet* Net, const char* DerpServer, const DerpKey* UserSecre
 	};
 
 #if DERPNET_USE_PLAIN_HTTP
-	const char* DerpServerPort = "8080";
+	const char* DerpServerPort = "8080";  // Docker plain HTTP on 8080
 #else
 	const char* DerpServerPort = "8443";
 #endif

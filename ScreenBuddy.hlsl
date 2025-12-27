@@ -18,10 +18,10 @@ void VS(in uint Id: SV_VertexID, out float4 Position : SV_Position, out float2 T
 
 //
 
-Texture2D<float3> Texture : register(t0);
+Texture2D<float4> Texture : register(t0);
 SamplerState LinearSampler : register(s0);
 
 float3 PS(in float4 Position : SV_Position, in float2 TexCoord : TEXCOORD) : SV_TARGET
 {
-	return Texture.Sample(LinearSampler, TexCoord);
+	return Texture.Sample(LinearSampler, TexCoord).rgb;
 }
