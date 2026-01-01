@@ -25,6 +25,21 @@ Get latest binary here: [Releases](https://github.com/eperry/screenbudy-ng/relea
 
 To build the binary from source code, have [Visual Studio][VS] installed, and simply run `build.cmd`.
 
+### Project Structure
+
+```
+ScreenBudy-NG/
+├── src/
+│   ├── core/        - Main application and configuration
+│   ├── network/     - DERP networking and connections
+│   ├── ui/          - Settings dialog and UI components
+│   └── utils/       - Logging, errors, cursor control
+├── resources/       - Icons, manifests, shaders, RC files
+├── tests/          - Unit test suites
+├── external/       - Third-party header libraries
+└── dist/           - Build output directory
+```
+
 ### Running Tests
 
 Run all tests with:
@@ -39,6 +54,25 @@ build_tests.cmd
 build_feature_tests.cmd
 build_server_tests.cmd
 ```
+
+## Configuration
+
+Screen Buddy uses two configuration files:
+
+1. **ScreenBuddy.ini** - DERP server configuration (in application directory)
+   ```ini
+   [Buddy]
+   DerpRegion=1
+   DerpRegion1=localhost
+   CaptureFullScreen=0
+   ```
+
+2. **config.json** - User settings (in `%AppData%\ScreenBuddy\`)
+   - Connection timeout
+   - Log directory location
+   - Private key encryption
+
+Access user settings via **Edit → Settings** menu.
 
 ## Technical Details
 

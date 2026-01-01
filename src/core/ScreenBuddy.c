@@ -561,8 +561,8 @@ static IMFMediaType* Buddy_CreateVideoType(const GUID* Subtype, UINT Width, UINT
 	IMFMediaType_SetUINT64(Type, &MF_MT_FRAME_SIZE, MF64(Width, Height));
 	IMFMediaType_SetUINT64(Type, &MF_MT_FRAME_RATE, MF64(Fps, 1));
 	IMFMediaType_SetUINT32(Type, &MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-	IMFMediaType_SetUINT32(Type, &MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_0_255);
-	IMFMediaType_SetUINT32(Type, &MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709);
+	IMFMediaType_SetUINT32(Type, &MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235);
+	IMFMediaType_SetUINT32(Type, &MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT601);
 	IMFMediaType_SetUINT32(Type, &MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709);
 	IMFMediaType_SetUINT32(Type, &MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709);
 	return Type;
@@ -876,7 +876,10 @@ static bool DerpHealthCheck(const BuddyConfig* cfg, char* logbuf, size_t logbufl
 	}
 	server.sin_family = AF_INET;
 	server.sin_port = htons(cfg->derp_server_port);
-	InetPtonA(AF_INET, "127.0.0.1", &server.sin_addr); // Only support IPv4/localhost for now
+	// Convert derp_server (wide string) to narrow string for InetPtonA
+	char narrowServer[256];
+	WideCharToMultiByte(CP_UTF8, 0, cfg->derp_server, -1, narrowServer, sizeof(narrowServer), NULL, NULL);
+	InetPtonA(AF_INET, narrowServer, &server.sin_addr);
 	result = connect(sock, (struct sockaddr*)&server, sizeof(server));
 	if (result == 0) {
 		_snprintf_s(logbuf, logbuflen, logbuflen - 1, "DERP health check succeeded\n");
@@ -1472,8 +1475,8 @@ static bool Buddy_ResetDecoder(IMFTransform* Decoder, IMFTransform* Converter)
 
 	HR(IMFTransform_SetOutputType(Decoder, 0, DecodedType, 0));
 	HR(IMFTransform_SetInputType(Converter, 0, DecodedType, 0));
-	IMFMediaType_SetUINT32(DecodedType, &MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_0_255);
-	IMFMediaType_SetUINT32(DecodedType, &MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709);
+	IMFMediaType_SetUINT32(DecodedType, &MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235);
+	IMFMediaType_SetUINT32(DecodedType, &MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT601);
 	IMFMediaType_SetUINT32(DecodedType, &MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709);
 	IMFMediaType_SetUINT32(DecodedType, &MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709);
 
@@ -3424,14 +3427,8 @@ static bool Buddy_StartConnection(ScreenBuddy* Buddy)
 	LOG_HEX("Generated Private Key", &NewPrivateKey, sizeof(NewPrivateKey));
 
 	char DerpHostName[256];
-	if (DERPNET_USE_PLAIN_HTTP)
-	{
-		lstrcpyA(DerpHostName, "127.0.0.1");
-	}
-	else
-	{
-		WideCharToMultiByte(CP_UTF8, 0, Buddy->DerpRegions[Region], -1, DerpHostName, ARRAYSIZE(DerpHostName), NULL, NULL);
-	}
+	// Use the configured DERP server from JSON config (Buddy->Config.derp_server)
+	WideCharToMultiByte(CP_UTF8, 0, Buddy->Config.derp_server, -1, DerpHostName, ARRAYSIZE(DerpHostName), NULL, NULL);
 
 	LOG_NET("========================================");
 	LOG_NET("DERP SERVER CONNECTION (Viewing)");

@@ -74,7 +74,7 @@ void BuddyConfig_Defaults(BuddyConfig* cfg) {
     cfg->framerate = 30; // Default 30 FPS
     cfg->bitrate = 4 * 1000 * 1000; // Default 4 Mbps
     cfg->use_bt709 = true;
-    cfg->use_full_range = true;
+    cfg->use_full_range = false; // Use limited range (16-235) for proper YUV conversion
     lstrcpyW(cfg->derp_server, L"localhost");
     cfg->derp_server_port = 8080;
     cfg->cursor_sticky = false;
