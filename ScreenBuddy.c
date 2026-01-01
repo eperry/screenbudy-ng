@@ -417,14 +417,14 @@ BUDDY_ID_LAN_CONNECT		= 237,
 	BUDDY_ID_WINDOW_CANCEL		= 340,
 
 	// dialog layout - Sci-Fi theme inspired by LCARS/B5
-	BUDDY_DIALOG_PADDING		= 10,  // Compact spacing for sci-fi aesthetic
-	BUDDY_DIALOG_ITEM_HEIGHT	= 24,  // Comfortable height for pill-shaped buttons
-	BUDDY_DIALOG_BUTTON_WIDTH	= 100, // LCARS-style buttons
-	BUDDY_DIALOG_BUTTON_SMALL	= 28,  // Icon buttons
-	BUDDY_DIALOG_KEY_WIDTH		= 280, // Code display width
-	BUDDY_DIALOG_WIDTH			= 360, // Compact but readable
-	BUDDY_DIALOG_ICON_SIZE		= 48,  // Prominent icons
-	BUDDY_BANNER_HEIGHT			= 40,
+	BUDDY_DIALOG_PADDING		= 6,   // Minimal padding for tight layout
+	BUDDY_DIALOG_ITEM_HEIGHT	= 22,  // Compact height
+	BUDDY_DIALOG_BUTTON_WIDTH	= 90,  // Tight LCARS-style buttons
+	BUDDY_DIALOG_BUTTON_SMALL	= 26,  // Compact icon buttons
+	BUDDY_DIALOG_KEY_WIDTH		= 340, // Code display width (wider to prevent cutoff)
+	BUDDY_DIALOG_WIDTH			= 480, // Width to accommodate code + icon buttons
+	BUDDY_DIALOG_ICON_SIZE		= 42,  // Compact icons
+	BUDDY_BANNER_HEIGHT			= 35,
 
 	// network packets
 	BUDDY_PACKET_VIDEO			= 0,
