@@ -3,6 +3,7 @@
 // Menu resource
 #define IDM_FILE_EXIT    100
 #define IDM_EDIT_SETTINGS 200
+#define IDM_HELP_ABOUT   300
 
 1 MENU
 BEGIN
@@ -13,5 +14,9 @@ BEGIN
     POPUP "&Edit"
     BEGIN
         MENUITEM "&Settings...", IDM_EDIT_SETTINGS
+    END
+    POPUP "&Help"
+    BEGIN
+        MENUITEM "&About...", IDM_HELP_ABOUT
     END
 END

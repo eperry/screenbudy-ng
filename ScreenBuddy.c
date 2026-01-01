@@ -48,6 +48,7 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <winhttp.h>
+#include <commctrl.h>
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mferror.h>
@@ -70,6 +71,7 @@
 // Menu resource IDs (must match ScreenBuddy.rc)
 #define IDM_FILE_EXIT    100
 #define IDM_EDIT_SETTINGS 200
+#define IDM_HELP_ABOUT   300
 
 #pragma comment (lib, "kernel32")
 #pragma comment (lib, "user32")
@@ -2932,7 +2934,7 @@ static LRESULT CALLBACK Buddy_WindowProc(HWND Window, UINT Message, WPARAM WPara
 
 // Forward declarations
 static void* Dialog__Align(uint8_t* Data, size_t Size);
-static void* Dialog__DoItem(void* Ptr, const char* Text, uint16_t Id, uint16_t Control, uint32_t Style, int X, int Y, int W, int H);
+static void* Dialog__DoItem(void* Ptr, const char* Text, uint16_t Id, uint16_t Control, uint32_t Style, uint32_t ExStyle, int X, int Y, int W, int H);
 
 // Simple window selection - enumerate directly into listbox
 typedef struct
@@ -3952,6 +3954,52 @@ static void Dialog_ShowShareKey(HWND Control, uint32_t Region, DerpKey* Key)
 	Edit_SetText(Control, Text);
 }
 
+// Subclass procedure for edit controls to draw white borders
+static LRESULT CALLBACK Buddy_EditSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData)
+{
+	switch (uMsg)
+	{
+		case WM_NCPAINT:
+		{
+			// Call default handler first
+			LRESULT result = DefSubclassProc(hWnd, uMsg, wParam, lParam);
+			
+			// Draw white border over the default border
+			HDC hdc = GetWindowDC(hWnd);
+			if (hdc)
+			{
+				RECT rect;
+				GetWindowRect(hWnd, &rect);
+				int width = rect.right - rect.left;
+				int height = rect.bottom - rect.top;
+				rect.left = 0;
+				rect.top = 0;
+				rect.right = width;
+				rect.bottom = height;
+				
+				// Draw white border
+				HPEN whitePen = CreatePen(PS_SOLID, 1, RGB(255, 255, 255));
+				HPEN oldPen = SelectObject(hdc, whitePen);
+				HBRUSH oldBrush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+				
+				Rectangle(hdc, rect.left, rect.top, rect.right, rect.bottom);
+				
+				SelectObject(hdc, oldBrush);
+				SelectObject(hdc, oldPen);
+				DeleteObject(whitePen);
+				ReleaseDC(hWnd, hdc);
+			}
+			return result;
+		}
+		
+		case WM_NCDESTROY:
+			RemoveWindowSubclass(hWnd, &Buddy_EditSubclassProc, uIdSubclass);
+			break;
+	}
+	
+	return DefSubclassProc(hWnd, uMsg, wParam, lParam);
+}
+
 static INT_PTR CALLBACK Buddy_DialogProc(HWND Dialog, UINT Message, WPARAM WParam, LPARAM LParam)
 {
 	ScreenBuddy* Buddy = (void*)GetWindowLongPtr(Dialog, GWLP_USERDATA);
@@ -4038,6 +4086,16 @@ static INT_PTR CALLBACK Buddy_DialogProc(HWND Dialog, UINT Message, WPARAM WPara
 		}
 		PostMessageW(ShareKey, EM_SETSEL, -1, 0);
 
+		// Subclass edit controls to draw white borders
+		HWND shareKeyEdit = GetDlgItem(Dialog, BUDDY_ID_SHARE_KEY);
+		HWND connectKeyEdit = GetDlgItem(Dialog, BUDDY_ID_CONNECT_KEY);
+		if (shareKeyEdit) {
+			SetWindowSubclass(shareKeyEdit, &Buddy_EditSubclassProc, 0, 0);
+		}
+		if (connectKeyEdit) {
+			SetWindowSubclass(connectKeyEdit, &Buddy_EditSubclassProc, 0, 0);
+		}
+
 		return FALSE;
 
 	case WM_DPICHANGED:
@@ -4069,45 +4127,50 @@ static INT_PTR CALLBACK Buddy_DialogProc(HWND Dialog, UINT Message, WPARAM WPara
 	}
 
 	case WM_CTLCOLORSTATIC:
-		if (GetDlgCtrlID((HWND)LParam) == BUDDY_ID_SHARE_KEY)
+	{
+		HWND hwndCtl = (HWND)LParam;
+		int ctrlId = GetDlgCtrlID(hwndCtl);
+		HDC hdc = (HDC)WParam;
+		
+		// Section headers (IDs 0xFFF0-0xFFFF)
+		if (ctrlId >= 0xFFF0)
 		{
-			HDC hdc = (HDC)WParam;
+			SetTextColor(hdc, RGB(0, 220, 255));  // Bright cyan for section titles
+			SetBkMode(hdc, TRANSPARENT);
+			return (INT_PTR)GetStockObject(NULL_BRUSH);
+		}
+		
+		// Share key display
+		if (ctrlId == BUDDY_ID_SHARE_KEY)
+		{
 			SetTextColor(hdc, RGB(255, 153, 0));  // LCARS orange
-			SetBkColor(hdc, RGB(20, 20, 30));  // Dark background
+			SetBkColor(hdc, RGB(20, 20, 30));
 			if (!Buddy->PanelBrush) {
 				Buddy->PanelBrush = CreateSolidBrush(RGB(20, 20, 30));
 			}
 			return (INT_PTR)Buddy->PanelBrush;
 		}
-		// Sci-fi styling for status labels
-		if (GetDlgCtrlID((HWND)LParam) == BUDDY_ID_SHARE_STATUS)
+		
+		// Status labels
+		if (ctrlId == BUDDY_ID_SHARE_STATUS)
 		{
-			HDC hdc = (HDC)WParam;
-			SetTextColor(hdc, RGB(0, 180, 255));  // Bright cyan accent
+			SetTextColor(hdc, RGB(0, 180, 255));  // Bright cyan
 			SetBkMode(hdc, TRANSPARENT);
 			return (INT_PTR)GetStockObject(NULL_BRUSH);
 		}
-		// Check if this is a group box (ID -1)
-		if (GetDlgCtrlID((HWND)LParam) == -1)
-		{
-			HDC hdc = (HDC)WParam;
-			SetTextColor(hdc, RGB(0, 220, 255));  // Bright cyan for high visibility
-			SetBkMode(hdc, TRANSPARENT);
-			return (INT_PTR)GetStockObject(NULL_BRUSH);
-		}
-		// Dark theme for all other static controls
-		{
-			HDC hdc = (HDC)WParam;
-			SetTextColor(hdc, RGB(200, 200, 220));  // Light gray text
-			SetBkMode(hdc, TRANSPARENT);
-			return (INT_PTR)GetStockObject(NULL_BRUSH);
-		}
+		
+		// All other static text - light gray
+		SetTextColor(hdc, RGB(200, 200, 220));
+		SetBkMode(hdc, TRANSPARENT);
+		return (INT_PTR)GetStockObject(NULL_BRUSH);
+	}
 	
 	case WM_CTLCOLOREDIT:
 	{
 		HDC hdc = (HDC)WParam;
 		SetTextColor(hdc, RGB(255, 153, 0));  // LCARS orange text
 		SetBkColor(hdc, RGB(30, 30, 45));  // Dark input background
+		SetDCBrushColor(hdc, RGB(255, 255, 255));  // White border
 		if (!Buddy->PanelBrush) {
 			Buddy->PanelBrush = CreateSolidBrush(RGB(30, 30, 45));
 		}
@@ -4126,6 +4189,24 @@ static INT_PTR CALLBACK Buddy_DialogProc(HWND Dialog, UINT Message, WPARAM WPara
 	case WM_CTLCOLORBTN:
 	{
 		HDC hdc = (HDC)WParam;
+		HWND hwndCtl = (HWND)LParam;
+		
+		// Check if this is a group box by checking the style
+		LONG style = GetWindowLong(hwndCtl, GWL_STYLE);
+		if ((style & BS_GROUPBOX) == BS_GROUPBOX)
+		{
+			// Group box title - use bright cyan for visibility
+			SetTextColor(hdc, RGB(0, 220, 255));
+			SetBkMode(hdc, TRANSPARENT);
+			// Return the dialog background brush for proper rendering
+			ScreenBuddy* Buddy = (void*)GetWindowLongPtr(GetParent(hwndCtl), GWLP_USERDATA);
+			if (Buddy && Buddy->DarkBgBrush) {
+				return (INT_PTR)Buddy->DarkBgBrush;
+			}
+			return (INT_PTR)GetStockObject(BLACK_BRUSH);
+		}
+		
+		// For regular buttons, use transparent background for owner-draw
 		SetBkMode(hdc, TRANSPARENT);
 		return (INT_PTR)GetStockObject(NULL_BRUSH);
 	}
@@ -4133,6 +4214,28 @@ static INT_PTR CALLBACK Buddy_DialogProc(HWND Dialog, UINT Message, WPARAM WPara
 	case WM_DRAWITEM:
 	{
 		LPDRAWITEMSTRUCT dis = (LPDRAWITEMSTRUCT)LParam;
+		
+		// Check if this is a section border (IDs 0xFFE0-0xFFEF)
+		if (dis->CtlID >= 0xFFE0 && dis->CtlID < 0xFFF0)
+		{
+			// Draw rounded border for section
+			HDC hdc = dis->hDC;
+			RECT rc = dis->rcItem;
+			
+			// Create rounded rectangle with cyan border
+			int radius = 8;  // Rounded corner radius
+			HPEN pen = CreatePen(PS_SOLID, 1, RGB(0, 220, 255));  // Cyan border
+			HPEN oldPen = SelectObject(hdc, pen);
+			HBRUSH oldBrush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+			
+			RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, radius, radius);
+			
+			SelectObject(hdc, oldBrush);
+			SelectObject(hdc, oldPen);
+			DeleteObject(pen);
+			return TRUE;
+		}
+		
 		if (dis->CtlType == ODT_BUTTON)
 		{
 			// Custom draw buttons with rounded corners (LCARS style)
@@ -4470,6 +4573,21 @@ static INT_PTR CALLBACK Buddy_DialogProc(HWND Dialog, UINT Message, WPARAM WPara
 		{
 			SendMessageW(Dialog, WM_CLOSE, 0, 0);
 		}
+		else if (Control == IDM_HELP_ABOUT)
+		{
+			// Show About dialog
+			wchar_t aboutText[512];
+			swprintf(aboutText, 512,
+				L"Screen Buddy v1.0.0 (Build %d)\n\n"
+				L"A high-performance screen sharing application\n"
+				L"built with DERP relay networking.\n\n"
+				L"Created by: Edward Perry\n\n"
+				L"GitHub: https://github.com/eperry/screenbudy-ng\n\n"
+				L"\u00a9 2026 Edward Perry. All rights reserved.",
+				BUILD_NUMBER);
+			
+			MessageBoxW(Dialog, aboutText, L"About Screen Buddy", MB_OK | MB_ICONINFORMATION);
+		}
 
 		return TRUE;
 	}
@@ -4609,13 +4727,14 @@ static void* Dialog__Align(uint8_t* Data, size_t Size)
 	return Data + ((Pointer + Size - 1) & ~(Size - 1)) - Pointer;
 }
 
-static void* Dialog__DoItem(void* Ptr, const char* Text, uint16_t Id, uint16_t Control, uint32_t Style, int X, int Y, int W, int H)
+static void* Dialog__DoItem(void* Ptr, const char* Text, uint16_t Id, uint16_t Control, uint32_t Style, uint32_t ExStyle, int X, int Y, int W, int H)
 {
 	uint8_t* Data = Dialog__Align(Ptr, sizeof(uint32_t));
 
 	*(DLGITEMTEMPLATE*)Data = (DLGITEMTEMPLATE)
 	{
 		.style = Style | WS_CHILD | WS_VISIBLE,
+		.dwExtendedStyle = ExStyle,
 		.x = X,
 		.y = Y,
 		.cx = W,
@@ -4694,19 +4813,27 @@ static void Buddy_DoDialogLayout(const Buddy_DialogLayout* Dialog, void* Buffer,
 			}
 		}
 
-		int X = GroupX;
-		int Y = GroupY;
-		int W = BUDDY_DIALOG_WIDTH - (2 * BUDDY_DIALOG_PADDING);  // Account for padding on both sides
-		int H = BUDDY_DIALOG_ITEM_HEIGHT * (1 + LineCount) + BUDDY_DIALOG_PADDING;
-
-		Data = Dialog__DoItem(Data, Group->Caption, -1, BUDDY_DIALOG_BUTTON, BS_GROUPBOX, X, Y, W, H);
+		int BoxX = GroupX;
+		int BoxY = GroupY;
+		int BoxW = BUDDY_DIALOG_WIDTH - (2 * BUDDY_DIALOG_PADDING);
+		int BoxH = BUDDY_DIALOG_ITEM_HEIGHT * (2 + LineCount) + (2 * BUDDY_DIALOG_PADDING);
+		
+		// Create rounded border box (owner-drawn static control)
+		static int groupIndex = 0;
+		Data = Dialog__DoItem(Data, "", 0xFFE0 + groupIndex, BUDDY_DIALOG_LABEL, SS_OWNERDRAW, 0, BoxX, BoxY, BoxW, BoxH);
 		ItemCount++;
 
-		X += BUDDY_DIALOG_PADDING;
-		Y += BUDDY_DIALOG_ITEM_HEIGHT;
-		W -= 2 * BUDDY_DIALOG_PADDING + BUDDY_DIALOG_ICON_SIZE;
+		// Create section header as a visible static label
+		Data = Dialog__DoItem(Data, Group->Caption, 0xFFF0 + groupIndex, BUDDY_DIALOG_LABEL, SS_LEFT, 0, BoxX + BUDDY_DIALOG_PADDING, BoxY + 2, BoxW - (2 * BUDDY_DIALOG_PADDING), BUDDY_DIALOG_ITEM_HEIGHT);
+		ItemCount++;
+		groupIndex++;
 
-		Data = Dialog__DoItem(Data, Group->Icon, Group->IconId, BUDDY_DIALOG_LABEL, 0, X + BUDDY_DIALOG_PADDING, Y - BUDDY_DIALOG_PADDING, BUDDY_DIALOG_ICON_SIZE, BUDDY_DIALOG_ICON_SIZE);
+		int X = BoxX + BUDDY_DIALOG_PADDING;
+		int Y = BoxY + BUDDY_DIALOG_ITEM_HEIGHT + 4;
+		int W = BoxW - 2 * BUDDY_DIALOG_PADDING - BUDDY_DIALOG_ICON_SIZE;
+
+		// Icon to the left
+		Data = Dialog__DoItem(Data, Group->Icon, Group->IconId, BUDDY_DIALOG_LABEL, 0, 0, X, Y, BUDDY_DIALOG_ICON_SIZE, BUDDY_DIALOG_ICON_SIZE);
 		ItemCount++;
 
 		X += BUDDY_DIALOG_ICON_SIZE;
@@ -4718,14 +4845,15 @@ static void Buddy_DoDialogLayout(const Buddy_DialogLayout* Dialog, void* Buffer,
 			{
 				Style |= WS_TABSTOP;
 			}
-			if (Item->Control == BUDDY_DIALOG_BUTTON)
+			if (Item->Control == BUDDY_DIALOG_BUTTON && Item->Id != -1)
 			{
-				// Owner-drawn buttons for custom sci-fi styling
+				// Owner-drawn buttons for custom sci-fi styling (but NOT for group boxes)
 				Style |= BS_OWNERDRAW;
 			}
 			if (Item->Control == BUDDY_DIALOG_EDIT)
 			{
-				Style |= WS_BORDER;  // All edit fields have borders
+				// Use simple border - no 3D effects
+				Style |= WS_BORDER;
 				if (Item->Flags & BUDDY_DIALOG_READ_ONLY)
 				{
 					Style |= ES_READONLY;
@@ -4744,7 +4872,7 @@ static void Buddy_DoDialogLayout(const Buddy_DialogLayout* Dialog, void* Buffer,
 			int ItemWidth = Item->Width ? Item->Width : W;
 			int ItemHeight = Item->Height ? Item->Height : BUDDY_DIALOG_ITEM_HEIGHT;
 
-			Data = Dialog__DoItem(Data, Item->Text, Item->Id, Item->Control, Style, X, Y + ItemExtraY, ItemWidth, ItemHeight);
+			Data = Dialog__DoItem(Data, Item->Text, Item->Id, Item->Control, Style, 0, X, Y + ItemExtraY, ItemWidth, ItemHeight);
 			ItemCount++;
 
 			if (Item->Flags & BUDDY_DIALOG_NEW_LINE)
@@ -4758,7 +4886,8 @@ static void Buddy_DoDialogLayout(const Buddy_DialogLayout* Dialog, void* Buffer,
 			}
 		}
 
-		GroupY = Y + BUDDY_DIALOG_PADDING;
+		// Move to next section - use the border box position and height with spacing
+		GroupY = BoxY + BoxH + BUDDY_DIALOG_PADDING;
 	}
 
 	*Template = (DLGTEMPLATE)
