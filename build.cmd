@@ -29,13 +29,18 @@ if "%1" equ "debug" (
   set LINK=/LTCG /OPT:REF /OPT:ICF
 )
 
-fxc.exe /nologo /T vs_5_0 /E VS /O3 /WX /Ges /Fh ScreenBuddyVS.h /Vn ScreenBuddyVS /Qstrip_reflect /Qstrip_debug /Qstrip_priv ScreenBuddy.hlsl || exit /b 1
-fxc.exe /nologo /T ps_5_0 /E PS /O3 /WX /Ges /Fh ScreenBuddyPS.h /Vn ScreenBuddyPS /Qstrip_reflect /Qstrip_debug /Qstrip_priv ScreenBuddy.hlsl || exit /b 1
+fxc.exe /nologo /T vs_5_0 /E VS /O3 /WX /Ges /Fh ScreenBuddyVS.h /Vn ScreenBuddyVS /Qstrip_reflect /Qstrip_debug /Qstrip_priv resources\ScreenBuddy.hlsl || exit /b 1
+fxc.exe /nologo /T ps_5_0 /E PS /O3 /WX /Ges /Fh ScreenBuddyPS.h /Vn ScreenBuddyPS /Qstrip_reflect /Qstrip_debug /Qstrip_priv resources\ScreenBuddy.hlsl || exit /b 1
 
-rc.exe /nologo ScreenBuddy.rc || exit /b 1
-rc.exe /nologo /fo settings_ui.res settings_ui.rc || exit /b 1
+rc.exe /nologo /fo ScreenBuddy.res /I resources resources\ScreenBuddy.rc || exit /b 1
+rc.exe /nologo /fo settings_ui.res /I resources resources\settings_ui.rc || exit /b 1
 echo Compiling with flags: %CL%
-cl.exe /nologo /W3 /WX ScreenBuddy.c config.c settings_ui.c logging.c direct_connection.c ScreenBuddy.res settings_ui.res /link /INCREMENTAL:NO /MANIFEST:EMBED /MANIFESTINPUT:ScreenBuddy.manifest /SUBSYSTEM:WINDOWS /FIXED /merge:_RDATA=.rdata windowsapp.lib shell32.lib comctl32.lib iphlpapi.lib /OUT:dist\ScreenBuddy.exe || exit /b 1
+cl.exe /nologo /W3 /WX /I src\core /I src\network /I src\ui /I src\utils /I . ^
+    src\core\ScreenBuddy.c src\core\config.c src\ui\settings_ui.c src\utils\logging.c src\network\direct_connection.c ^
+    src\utils\errors.c src\utils\cursor_control.c ^
+    ScreenBuddy.res settings_ui.res ^
+    /link /INCREMENTAL:NO /MANIFEST:EMBED /MANIFESTINPUT:resources\ScreenBuddy.manifest /SUBSYSTEM:WINDOWS /FIXED /merge:_RDATA=.rdata ^
+    windowsapp.lib shell32.lib comctl32.lib iphlpapi.lib /OUT:dist\ScreenBuddy.exe || exit /b 1
 
 REM Clean up build artifacts
 del *.obj *.res >nul 2>&1
