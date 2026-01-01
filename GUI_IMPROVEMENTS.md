@@ -1,5 +1,76 @@
 # GUI Improvements & Security Enhancements
 
+## Build 154 - Modern Windows 11 Style & Settings Configuration
+
+### Log Directory Configuration
+
+**New Feature**: Configurable log file location
+- Added `log_directory` field to `BuddyConfig` structure
+- Default location: `%AppData%\ScreenBuddy\Logs`
+- JSON persistence: Saves and loads from config file
+- Settings UI integration: Browse button for easy folder selection
+
+### Settings Dialog Enhancements
+
+#### File Locations Section (New)
+1. **Config File Path** (Read-Only)
+   - Shows current config file location
+   - Typically: `%AppData%\ScreenBuddy\config.json`
+   - Helps users locate configuration for backup/sharing
+
+2. **Log Directory** (Editable)
+   - Text field showing current log directory
+   - "Browse..." button launches folder picker
+   - Auto-saves on field blur
+   - Validates that path is not empty
+
+### Windows 11 Modern Styling
+
+#### Spacing & Layout
+- **Dialog Padding**: 8px → **12px** (50% increase from Build 152)
+- **Item Height**: 18px → **20px** (better touch targets)
+- **Button Width**: 80px → **90px** (more comfortable)
+- **Icon Buttons**: 20px → **24px** (larger tap area)
+- **Key Width**: 268px → **260px** (adjusted for new padding)
+
+#### Typography
+- **Font Size**: 9pt → **10pt** Segoe UI
+- Better readability on high-DPI displays
+- Consistent with Windows 11 system fonts
+
+#### Visual Design
+- **Status Labels**: Windows 11 accent blue (#0078D4)
+- Transparent background for status text
+- Better visual hierarchy with color coding
+- Modern, clean appearance
+
+### Technical Implementation
+
+#### Config System (`config.h`, `config.c`)
+```c
+typedef struct {
+    // ... existing fields ...
+    wchar_t log_directory[MAX_PATH];  // NEW in Build 154
+} BuddyConfig;
+```
+
+- `BuddyConfig_Defaults()`: Sets default to `%AppData%\ScreenBuddy\Logs`
+- `write_json()`: Serializes log_directory to JSON
+- `BuddyConfig_Load()`: Deserializes from JSON with backward compatibility
+
+#### Settings UI (`settings_ui.c`, `settings_ui.rc`)
+- New control IDs:
+  - `IDC_LOG_DIR_EDIT` (1012): Log directory edit field
+  - `IDC_LOG_DIR_BROWSE` (1013): Browse button  
+  - `IDC_CONFIG_PATH_EDIT` (1014): Config path display
+
+- Browse handler uses `SHBrowseForFolderW`:
+  - Modern folder picker dialog
+  - Returns only file system directories
+  - Validates selection before applying
+
+---
+
 ## Professional GUI Updates (Build 152)
 
 ### Visual Improvements
