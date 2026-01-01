@@ -4091,7 +4091,7 @@ static INT_PTR CALLBACK Buddy_DialogProc(HWND Dialog, UINT Message, WPARAM WPara
 		if (GetDlgCtrlID((HWND)LParam) == -1)
 		{
 			HDC hdc = (HDC)WParam;
-			SetTextColor(hdc, RGB(255, 180, 50));  // LCARS orange for group titles
+			SetTextColor(hdc, RGB(0, 220, 255));  // Bright cyan for high visibility
 			SetBkMode(hdc, TRANSPARENT);
 			return (INT_PTR)GetStockObject(NULL_BRUSH);
 		}
@@ -4725,14 +4725,10 @@ static void Buddy_DoDialogLayout(const Buddy_DialogLayout* Dialog, void* Buffer,
 			}
 			if (Item->Control == BUDDY_DIALOG_EDIT)
 			{
+				Style |= WS_BORDER;  // All edit fields have borders
 				if (Item->Flags & BUDDY_DIALOG_READ_ONLY)
 				{
 					Style |= ES_READONLY;
-					// No WS_BORDER for readonly to avoid blue underline
-				}
-				else
-				{
-					Style |= WS_BORDER;
 				}
 			}
 			if (Item->Control == BUDDY_DIALOG_LISTBOX)
@@ -4779,9 +4775,13 @@ static void Buddy_DoDialogLayout(const Buddy_DialogLayout* Dialog, void* Buffer,
 
 static HWND Buddy_CreateDialog(ScreenBuddy* Buddy)
 {
+	// Create title with version info
+	wchar_t titleBuffer[256];
+	swprintf(titleBuffer, 256, L"Screen Buddy v1.0.0 (Build %d)", BUILD_NUMBER);
+	
 	Buddy_DialogLayout DialogLayout =
 	{
-		.Title = BUDDY_TITLE,
+		.Title = titleBuffer,
 		.Font = "Segoe UI",
 		.FontSize = 9,  // Compact font for tight layout
 		.Groups = (Buddy_DialogGroup[])
@@ -4792,7 +4792,6 @@ static HWND Buddy_CreateDialog(ScreenBuddy* Buddy)
 				.IconId = BUDDY_ID_SHARE_ICON,
 				.Items = (Buddy_DialogItem[])
 				{
-					{ BUDDY_VERSION_STRING,								0,						BUDDY_DIALOG_LABEL,		0,							BUDDY_DIALOG_NEW_LINE,	0 },
 					{ "Use the following code to share your screen:",	0,						BUDDY_DIALOG_LABEL,		0,							BUDDY_DIALOG_NEW_LINE,	0 },
 					{ "",												BUDDY_ID_SHARE_KEY,		BUDDY_DIALOG_EDIT,		BUDDY_DIALOG_KEY_WIDTH,		BUDDY_DIALOG_READ_ONLY,	0 },
 					{ "\xEE\x85\xAF",									BUDDY_ID_SHARE_COPY,	BUDDY_DIALOG_BUTTON,	BUDDY_DIALOG_BUTTON_SMALL,							0 },
