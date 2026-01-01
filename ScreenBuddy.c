@@ -4087,6 +4087,14 @@ static INT_PTR CALLBACK Buddy_DialogProc(HWND Dialog, UINT Message, WPARAM WPara
 			SetBkMode(hdc, TRANSPARENT);
 			return (INT_PTR)GetStockObject(NULL_BRUSH);
 		}
+		// Check if this is a group box (ID -1)
+		if (GetDlgCtrlID((HWND)LParam) == -1)
+		{
+			HDC hdc = (HDC)WParam;
+			SetTextColor(hdc, RGB(255, 180, 50));  // LCARS orange for group titles
+			SetBkMode(hdc, TRANSPARENT);
+			return (INT_PTR)GetStockObject(NULL_BRUSH);
+		}
 		// Dark theme for all other static controls
 		{
 			HDC hdc = (HDC)WParam;
@@ -4720,8 +4728,12 @@ static void Buddy_DoDialogLayout(const Buddy_DialogLayout* Dialog, void* Buffer,
 				if (Item->Flags & BUDDY_DIALOG_READ_ONLY)
 				{
 					Style |= ES_READONLY;
+					// No WS_BORDER for readonly to avoid blue underline
 				}
-				Style |= WS_BORDER;
+				else
+				{
+					Style |= WS_BORDER;
+				}
 			}
 			if (Item->Control == BUDDY_DIALOG_LISTBOX)
 			{
@@ -4732,7 +4744,7 @@ static void Buddy_DoDialogLayout(const Buddy_DialogLayout* Dialog, void* Buffer,
 				Style |= WS_VSCROLL | CBS_DROPDOWN | CBS_HASSTRINGS | CBS_AUTOHSCROLL;
 			}
 
-			int ItemExtraY = (Item->Control == BUDDY_DIALOG_EDIT || Item->Control == BUDDY_DIALOG_COMBOBOX || Item->Width) ? -2 : 0;
+			int ItemExtraY = (Item->Control == BUDDY_DIALOG_EDIT || Item->Control == BUDDY_DIALOG_COMBOBOX || Item->Width) ? -1 : 0;  // Tighter spacing
 			int ItemWidth = Item->Width ? Item->Width : W;
 			int ItemHeight = Item->Height ? Item->Height : BUDDY_DIALOG_ITEM_HEIGHT;
 
