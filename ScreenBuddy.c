@@ -416,15 +416,15 @@ BUDDY_ID_LAN_CONNECT		= 237,
 	BUDDY_ID_WINDOW_SELECT		= 330,
 	BUDDY_ID_WINDOW_CANCEL		= 340,
 
-	// dialog layout
-	BUDDY_DIALOG_PADDING		= 12,  // Modern Windows 11 spacing (increased from 8)
-	BUDDY_DIALOG_ITEM_HEIGHT	= 20,  // Increased for better touch targets (was 18)
-	BUDDY_DIALOG_BUTTON_WIDTH	= 90,  // Wider modern buttons (was 80)
-	BUDDY_DIALOG_BUTTON_SMALL	= 24,  // Slightly larger icon buttons (was 20)
-	BUDDY_DIALOG_KEY_WIDTH		= 260,  // Adjusted for new padding (was 268)
-	BUDDY_DIALOG_WIDTH			= 380,  // Wider for better layout
-	BUDDY_DIALOG_ICON_SIZE		= 48,  // Larger icons for modern look
-	BUDDY_BANNER_HEIGHT			= 40,
+	// dialog layout - Sci-Fi theme inspired by LCARS/B5
+	BUDDY_DIALOG_PADDING		= 16,  // Dramatic spacing for sci-fi aesthetic
+	BUDDY_DIALOG_ITEM_HEIGHT	= 28,  // Taller for futuristic pill-shaped buttons
+	BUDDY_DIALOG_BUTTON_WIDTH	= 110, // Wide LCARS-style buttons
+	BUDDY_DIALOG_BUTTON_SMALL	= 32,  // Larger icon buttons
+	BUDDY_DIALOG_KEY_WIDTH		= 300, // Wider code display
+	BUDDY_DIALOG_WIDTH			= 420, // Wider for dramatic layout
+	BUDDY_DIALOG_ICON_SIZE		= 56,  // Prominent icons
+	BUDDY_BANNER_HEIGHT			= 45,
 
 	// network packets
 	BUDDY_PACKET_VIDEO			= 0,
@@ -470,6 +470,9 @@ typedef struct
 	// windows stuff
 	HICON Icon;
 	HFONT DialogFont;
+	HBRUSH DarkBgBrush;
+	HBRUSH PanelBrush;
+	HBRUSH AccentBrush;
 	HWND MainWindow;
 	HWND DialogWindow;
 	HWND ProgressWindow;
@@ -4045,17 +4048,118 @@ static INT_PTR CALLBACK Buddy_DialogProc(HWND Dialog, UINT Message, WPARAM WPara
 	case WM_CTLCOLORSTATIC:
 		if (GetDlgCtrlID((HWND)LParam) == BUDDY_ID_SHARE_KEY)
 		{
-			return (INT_PTR)GetSysColorBrush(COLOR_WINDOW);
+			HDC hdc = (HDC)WParam;
+			SetTextColor(hdc, RGB(255, 153, 0));  // LCARS orange
+			SetBkColor(hdc, RGB(20, 20, 30));  // Dark background
+			if (!Buddy->PanelBrush) {
+				Buddy->PanelBrush = CreateSolidBrush(RGB(20, 20, 30));
+			}
+			return (INT_PTR)Buddy->PanelBrush;
 		}
-		// Modern styling for status labels
+		// Sci-fi styling for status labels
 		if (GetDlgCtrlID((HWND)LParam) == BUDDY_ID_SHARE_STATUS)
 		{
 			HDC hdc = (HDC)WParam;
-			SetTextColor(hdc, RGB(0, 120, 212));  // Windows 11 accent blue
+			SetTextColor(hdc, RGB(0, 180, 255));  // Bright cyan accent
 			SetBkMode(hdc, TRANSPARENT);
-			return (INT_PTR)GetSysColorBrush(COLOR_BTNFACE);
+			return (INT_PTR)GetStockObject(NULL_BRUSH);
 		}
-		break;
+		// Dark theme for all other static controls
+		{
+			HDC hdc = (HDC)WParam;
+			SetTextColor(hdc, RGB(200, 200, 220));  // Light gray text
+			SetBkMode(hdc, TRANSPARENT);
+			return (INT_PTR)GetStockObject(NULL_BRUSH);
+		}
+	
+	case WM_CTLCOLOREDIT:
+	{
+		HDC hdc = (HDC)WParam;
+		SetTextColor(hdc, RGB(255, 153, 0));  // LCARS orange text
+		SetBkColor(hdc, RGB(30, 30, 45));  // Dark input background
+		if (!Buddy->PanelBrush) {
+			Buddy->PanelBrush = CreateSolidBrush(RGB(30, 30, 45));
+		}
+		return (INT_PTR)Buddy->PanelBrush;
+	}
+
+	case WM_CTLCOLORDLG:
+	{
+		// Dark background for dialog
+		if (!Buddy->DarkBgBrush) {
+			Buddy->DarkBgBrush = CreateSolidBrush(RGB(15, 15, 25));  // Very dark blue-black
+		}
+		return (INT_PTR)Buddy->DarkBgBrush;
+	}
+
+	case WM_CTLCOLORBTN:
+	{
+		HDC hdc = (HDC)WParam;
+		SetBkMode(hdc, TRANSPARENT);
+		return (INT_PTR)GetStockObject(NULL_BRUSH);
+	}
+
+	case WM_DRAWITEM:
+	{
+		LPDRAWITEMSTRUCT dis = (LPDRAWITEMSTRUCT)LParam;
+		if (dis->CtlType == ODT_BUTTON)
+		{
+			// Custom draw buttons with rounded corners (LCARS style)
+			HDC hdc = dis->hDC;
+			RECT rc = dis->rcItem;
+			
+			// Determine button color based on state
+			COLORREF btnColor;
+			COLORREF textColor = RGB(0, 0, 0);
+			
+			if (dis->itemState & ODS_DISABLED)
+			{
+				btnColor = RGB(60, 60, 70);  // Disabled gray
+				textColor = RGB(100, 100, 110);
+			}
+			else if (dis->itemState & ODS_SELECTED)
+			{
+				btnColor = RGB(220, 130, 0);  // Pressed orange
+				textColor = RGB(255, 255, 255);
+			}
+			else if (dis->itemState & ODS_FOCUS)
+			{
+				btnColor = RGB(255, 180, 50);  // Bright LCARS orange
+				textColor = RGB(0, 0, 0);
+			}
+			else
+			{
+				btnColor = RGB(255, 153, 0);  // Default LCARS orange
+				textColor = RGB(0, 0, 0);
+			}
+			
+			// Draw rounded rectangle (pill shape for wide buttons)
+			int radius = min(rc.bottom - rc.top, 20) / 2;
+			HBRUSH brush = CreateSolidBrush(btnColor);
+			HPEN pen = CreatePen(PS_SOLID, 2, RGB(255, 200, 100));  // Bright outline
+			HBRUSH oldBrush = SelectObject(hdc, brush);
+			HPEN oldPen = SelectObject(hdc, pen);
+			
+			SetBkMode(hdc, TRANSPARENT);
+			RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, radius * 2, radius * 2);
+			
+			// Draw button text
+			wchar_t text[256];
+			GetWindowTextW(dis->hwndItem, text, 256);
+			SetTextColor(hdc, textColor);
+			HFONT font = (HFONT)SendMessageW(dis->hwndItem, WM_GETFONT, 0, 0);
+			if (font) SelectObject(hdc, font);
+			DrawTextW(hdc, text, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+			
+			SelectObject(hdc, oldBrush);
+			SelectObject(hdc, oldPen);
+			DeleteObject(brush);
+			DeleteObject(pen);
+			
+			return TRUE;
+		}
+		return FALSE;
+	}
 
 	case WM_DROPFILES:
 		if (Buddy->State == BUDDY_STATE_SHARING)
@@ -4087,11 +4191,26 @@ static INT_PTR CALLBACK Buddy_DialogProc(HWND Dialog, UINT Message, WPARAM WPara
 			Buddy_StopSharing(Buddy);
 		}
 
-		// Cleanup font
+		// Cleanup font and brushes
 		if (Buddy->DialogFont)
 		{
 			DeleteObject(Buddy->DialogFont);
 			Buddy->DialogFont = NULL;
+		}
+		if (Buddy->DarkBgBrush)
+		{
+			DeleteObject(Buddy->DarkBgBrush);
+			Buddy->DarkBgBrush = NULL;
+		}
+		if (Buddy->PanelBrush)
+		{
+			DeleteObject(Buddy->PanelBrush);
+			Buddy->PanelBrush = NULL;
+		}
+		if (Buddy->AccentBrush)
+		{
+			DeleteObject(Buddy->AccentBrush);
+			Buddy->AccentBrush = NULL;
 		}
 
 		// LAN discovery cleanup removed
@@ -4568,6 +4687,11 @@ static void Buddy_DoDialogLayout(const Buddy_DialogLayout* Dialog, void* Buffer,
 			{
 				Style |= WS_TABSTOP;
 			}
+			if (Item->Control == BUDDY_DIALOG_BUTTON)
+			{
+				// Owner-drawn buttons for custom sci-fi styling
+				Style |= BS_OWNERDRAW;
+			}
 			if (Item->Control == BUDDY_DIALOG_EDIT)
 			{
 				if (Item->Flags & BUDDY_DIALOG_READ_ONLY)
@@ -4624,7 +4748,7 @@ static HWND Buddy_CreateDialog(ScreenBuddy* Buddy)
 	{
 		.Title = BUDDY_TITLE,
 		.Font = "Segoe UI",
-		.FontSize = 10,  // Slightly larger for better readability
+		.FontSize = 11,  // Larger for sci-fi aesthetic
 		.Groups = (Buddy_DialogGroup[])
 		{
 			{
