@@ -372,6 +372,10 @@ enum
 	BUDDY_FILENAME_MAX = 256,
 	BUDDY_TEXT_BUFFER_MAX = 1024,
 	BUDDY_KEY_TEXT_MAX = 256,
+	
+	// timeout settings
+	BUDDY_SHARE_TIMEOUT_MS = 5 * 60 * 1000,  // 5 minutes in milliseconds
+	BUDDY_SHARE_TIMEOUT_CHECK_MS = 1000,     // Check every second
 
 	// windows message notifications
 	BUDDY_WM_BEST_REGION = WM_USER + 1,
@@ -387,6 +391,7 @@ enum
 	BUDDY_FILE_TIMER			= 333,
 BUDDY_FRAME_TIMER			= 444,
 BUDDY_LAN_TIMER			= 555,
+BUDDY_SHARE_TIMEOUT_TIMER	= 666,  // Timer for 5-minute share timeout
 
 	// dialog controls
 	BUDDY_ID_SHARE_ICON			= 100,
@@ -395,6 +400,7 @@ BUDDY_LAN_TIMER			= 555,
 	BUDDY_ID_SHARE_NEW			= 130,
 	BUDDY_ID_SHARE_BUTTON		= 140,
 	BUDDY_ID_SHARE_FULLSCREEN	= 145,
+	BUDDY_ID_SHARE_STATUS		= 160,  // Status label for connection timeout
 BUDDY_ID_CONNECT_ICON		= 200,
 BUDDY_ID_CONNECT_KEY		= 210,
 BUDDY_ID_CONNECT_PASTE		= 220,
@@ -411,13 +417,13 @@ BUDDY_ID_LAN_CONNECT		= 237,
 	BUDDY_ID_WINDOW_CANCEL		= 340,
 
 	// dialog layout
-	BUDDY_DIALOG_PADDING		= 4,
-	BUDDY_DIALOG_ITEM_HEIGHT	= 14,
-	BUDDY_DIALOG_BUTTON_WIDTH	= 60,
-	BUDDY_DIALOG_BUTTON_SMALL	= BUDDY_DIALOG_ITEM_HEIGHT,
+	BUDDY_DIALOG_PADDING		= 8,  // Increased for modern spacing
+	BUDDY_DIALOG_ITEM_HEIGHT	= 18,  // Increased for better readability
+	BUDDY_DIALOG_BUTTON_WIDTH	= 80,  // Wider buttons for better touch targets
+	BUDDY_DIALOG_BUTTON_SMALL	= 20,
 	BUDDY_DIALOG_KEY_WIDTH		= 268,
-	BUDDY_DIALOG_WIDTH			= 350,
-	BUDDY_DIALOG_ICON_SIZE		= 42,
+	BUDDY_DIALOG_WIDTH			= 380,  // Wider for better layout
+	BUDDY_DIALOG_ICON_SIZE		= 48,  // Larger icons for modern look
 	BUDDY_BANNER_HEIGHT			= 40,
 
 	// network packets
@@ -478,6 +484,8 @@ typedef struct
 
 	// UI state
 	bool CursorHidden;
+	uint64_t ShareStartTime;  // Time when share button was clicked (for timeout)
+	bool ShareTimeoutActive;  // Whether 5-minute timeout is enabled
 
 	// derp stuff
 	HANDLE DerpRegionThread;
@@ -3642,10 +3650,60 @@ static void Buddy_NetworkEvent(ScreenBuddy* Buddy)
 			if (RecvSize == 0)
 			{
 				LOG_INFO("========================================");
-				LOG_INFO("VIEWER CONNECTED!");
+				LOG_INFO("INCOMING CONNECTION REQUEST!");
 				LOG_INFO("========================================");
-				Buddy->RemoteKey = RecvKey;
 				LOG_HEX("Viewer Public Key", &RecvKey, sizeof(RecvKey));
+				
+				// Convert public key to hex for display
+				wchar_t keyHex[256];
+				wchar_t* p = keyHex;
+				for (int i = 0; i < 8; i++) {  // Show first 8 bytes (16 hex chars)
+					p += swprintf_s(p, 4, L"%02X", RecvKey.Bytes[i]);
+					if (i == 3) *p++ = L'-';  // Add separator after 4 bytes
+				}
+				*p++ = L'.';
+				*p++ = L'.';
+				*p++ = L'.';
+				*p = L'\0';
+				
+				// Security confirmation dialog
+				wchar_t confirmMsg[512];
+				swprintf_s(confirmMsg, 512,
+					L"Someone is trying to connect to your screen!\n\n"
+					L"Connection Key: %ls\n\n"
+					L"Do you want to allow this connection?\n\n"
+					L"Click YES to allow, NO to reject.",
+					keyHex);
+				
+				int response = MessageBoxW(Buddy->DialogWindow, confirmMsg, 
+					L"Incoming Connection", MB_YESNO | MB_ICONQUESTION | MB_TOPMOST);
+				
+				if (response != IDYES)
+				{
+					LOG_WARN("User rejected incoming connection");
+					// Send disconnect packet to reject
+					uint8_t Data[1] = { BUDDY_PACKET_DISCONNECT };
+					DerpNet_Send(&Buddy->Net, &RecvKey, Data, sizeof(Data));
+					
+					Buddy_CancelWait(Buddy);
+					DerpNet_Close(&Buddy->Net);
+					Buddy_StopSharing(Buddy);
+					
+					// Stop timeout timer
+					KillTimer(Buddy->DialogWindow, BUDDY_SHARE_TIMEOUT_TIMER);
+					Buddy->ShareTimeoutActive = false;
+					
+					Buddy_UpdateState(Buddy, BUDDY_STATE_INITIAL);
+					break;
+				}
+				
+				LOG_INFO("User accepted connection - starting screen share");
+				Buddy->RemoteKey = RecvKey;
+
+				// Stop timeout timer - connection accepted
+				KillTimer(Buddy->DialogWindow, BUDDY_SHARE_TIMEOUT_TIMER);
+				Buddy->ShareTimeoutActive = false;
+				SetDlgItemTextW(Buddy->DialogWindow, BUDDY_ID_SHARE_STATUS, L"Connected!");
 
 				LOG_INFO("Starting screen capture...");
 				ScreenCapture_Start(&Buddy->Capture, true, true);
@@ -4070,6 +4128,41 @@ static INT_PTR CALLBACK Buddy_DialogProc(HWND Dialog, UINT Message, WPARAM WPara
 				Buddy_OnFrameCapture(&Buddy->Capture, false);
 			}
 		}
+		else if (WParam == BUDDY_SHARE_TIMEOUT_TIMER)
+		{
+			// Check if share has timed out (5 minutes without connection)
+			if (Buddy->ShareTimeoutActive && Buddy->State == BUDDY_STATE_SHARE_STARTED)
+			{
+				uint64_t elapsed = GetTickCount64() - Buddy->ShareStartTime;
+				uint64_t remaining = (elapsed < BUDDY_SHARE_TIMEOUT_MS) ? 
+					(BUDDY_SHARE_TIMEOUT_MS - elapsed) : 0;
+				
+				// Update status label with remaining time
+				int remainingMinutes = (int)(remaining / 60000);
+				int remainingSeconds = (int)((remaining % 60000) / 1000);
+				wchar_t status[100];
+				swprintf_s(status, 100, L"Waiting for connection... %d:%02d remaining", 
+					remainingMinutes, remainingSeconds);
+				SetDlgItemTextW(Dialog, BUDDY_ID_SHARE_STATUS, status);
+				
+				if (remaining == 0)
+				{
+					// Timeout expired - stop sharing
+					LOG_WARN("Share timeout expired after 5 minutes with no connection");
+					KillTimer(Dialog, BUDDY_SHARE_TIMEOUT_TIMER);
+					Buddy->ShareTimeoutActive = false;
+					
+					Buddy_CancelWait(Buddy);
+					DerpNet_Close(&Buddy->Net);
+					Buddy_StopSharing(Buddy);
+					Buddy_UpdateState(Buddy, BUDDY_STATE_INITIAL);
+					
+					MessageBoxW(Dialog, 
+						L"Share session timed out after 5 minutes with no connection.\n\nClick Share again to start a new session.", 
+						L"Share Timeout", MB_OK | MB_ICONINFORMATION);
+				}
+			}
+		}
 		return TRUE;
 
 	case WM_COMMAND:
@@ -4168,6 +4261,11 @@ static INT_PTR CALLBACK Buddy_DialogProc(HWND Dialog, UINT Message, WPARAM WPara
 					Buddy_CancelWait(Buddy);
 					DerpNet_Close(&Buddy->Net);
 					Buddy_StopSharing(Buddy);
+					
+					// Stop timeout timer
+					KillTimer(Dialog, BUDDY_SHARE_TIMEOUT_TIMER);
+					Buddy->ShareTimeoutActive = false;
+					
 					Buddy_UpdateState(Buddy, BUDDY_STATE_INITIAL);
 				}
 			}
@@ -4176,6 +4274,12 @@ static INT_PTR CALLBACK Buddy_DialogProc(HWND Dialog, UINT Message, WPARAM WPara
 				if (Buddy_StartSharing(Buddy))
 				{
 					Buddy_UpdateState(Buddy, BUDDY_STATE_SHARE_STARTED);
+					
+					// Start 5-minute timeout timer
+					Buddy->ShareStartTime = GetTickCount64();
+					Buddy->ShareTimeoutActive = true;
+					SetTimer(Dialog, BUDDY_SHARE_TIMEOUT_TIMER, BUDDY_SHARE_TIMEOUT_CHECK_MS, NULL);
+					LOG_INFO("Share timeout started - will expire in 5 minutes if no connection");
 				}
 			}
 		}
@@ -4527,6 +4631,7 @@ static HWND Buddy_CreateDialog(ScreenBuddy* Buddy)
 					{ "\xEE\x85\xAF",									BUDDY_ID_SHARE_COPY,	BUDDY_DIALOG_BUTTON,	BUDDY_DIALOG_BUTTON_SMALL,							0 },
 					{ "\xEE\x84\x97",									BUDDY_ID_SHARE_NEW,		BUDDY_DIALOG_BUTTON,	BUDDY_DIALOG_BUTTON_SMALL,	BUDDY_DIALOG_NEW_LINE,	0 },
 					{ "Share",											BUDDY_ID_SHARE_BUTTON,	BUDDY_DIALOG_BUTTON,	BUDDY_DIALOG_BUTTON_WIDTH,	BUDDY_DIALOG_NEW_LINE,	0 },
+					{ "",												BUDDY_ID_SHARE_STATUS,	BUDDY_DIALOG_LABEL,		0,							BUDDY_DIALOG_NEW_LINE,	0 },
 					{ NULL },
 				},
 			},
