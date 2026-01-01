@@ -1,0 +1,44 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Build ScreenBuddy (no tests)",
+			"type": "shell",
+			"command": "build.cmd",
+			"args": [
+				"notest"
+			],
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "Build ScreenBuddy",
+			"type": "shell",
+			"command": "build.cmd",
+			"args": [],
+			"isBackground": false,
+			"problemMatcher": [
+				"$gcc"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build ScreenBuddy",
+			"type": "shell",
+			"command": "build_with_options.cmd",
+			"group": "build"
+		},
+		{
+			"label": "Build ScreenBuddy (with options)",
+			"type": "shell",
+			"command": "ScreenBuddy\\build_with_options.cmd",
+			"group": "build"
+		},
+		{
+			"label": "Build and Test (all-in-one)",
+			"type": "shell",
+			"command": "ScreenBuddy\\build.cmd",
+			"group": "build"
+		}
+	]
+}

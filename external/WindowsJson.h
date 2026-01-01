@@ -14,6 +14,10 @@ typedef __x_ABI_CWindows_CData_CJson_CIJsonArray  JsonArray;
 typedef __FIIterator_1___FIKeyValuePair_2_HSTRING_Windows__CData__CJson__CIJsonValue JsonIterator;
 
 #define JsonCSTR(Name) (HSTRING)&(JsonHSTRING){ 1, sizeof(Name) - 1, 0, 0, L ## Name }
+
+#ifndef IUnknown_Release
+static __inline ULONG IUnknown_Release(IUnknown* p) { return p ? p->lpVtbl->Release(p) : 0; }
+#endif
 #define JsonRelease(Obj) do { if (Obj) IUnknown_Release((IUnknown*)Obj); } while (0)
 
 // NOTE: make sure you have called RoInitialize() before using any of functions

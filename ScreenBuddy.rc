@@ -1,1 +1,17 @@
 1 ICON  "ScreenBuddy.ico"
+
+// Menu resource
+#define IDM_FILE_EXIT    100
+#define IDM_EDIT_SETTINGS 200
+
+1 MENU
+BEGIN
+    POPUP "&File"
+    BEGIN
+        MENUITEM "E&xit", IDM_FILE_EXIT
+    END
+    POPUP "&Edit"
+    BEGIN
+        MENUITEM "&Settings...", IDM_EDIT_SETTINGS
+    END
+END

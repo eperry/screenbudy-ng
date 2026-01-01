@@ -3,6 +3,8 @@
 #include <d3d11.h>
 #include <dwmapi.h>
 
+#include <unknwn.h> // For IUnknown_Release
+
 #define WINDOWS_FOUNDATION_UNIVERSALAPICONTRACT_VERSION 0xc0000
 #include <windows.graphics.capture.h>
 
@@ -610,7 +612,9 @@ bool ScreenCapture_GetFrame(ScreenCapture* Capture, ScreenCaptureFrame* Frame)
 void ScreenCapture_ReleaseFrame(ScreenCapture* Capture, ScreenCaptureFrame* Frame)
 {
 	ID3D11Texture2D_Release(Frame->Texture);
-	IUnknown_Release(Frame->NextFrame);
+	if (Frame->NextFrame) {
+		Frame->NextFrame->lpVtbl->Release(Frame->NextFrame);
+	}
 
 	if (Capture->CurrentSize.Width != Frame->Width || Capture->CurrentSize.Height != Frame->Height)
 	{

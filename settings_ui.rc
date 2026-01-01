@@ -1,0 +1,61 @@
+#include <windows.h>
+#include <commctrl.h>
+
+// Control IDs
+#define IDC_STATIC              -1
+#define IDD_SETTINGS            101
+#define IDC_LOG_LEVEL_COMBO     1001
+#define IDC_FRAMERATE_EDIT      1002
+#define IDC_BITRATE_EDIT        1003
+#define IDC_BT709_CHECK         1004
+#define IDC_FULLRANGE_CHECK     1005
+#define IDC_DERP_SERVER_EDIT    1006
+#define IDC_CURSOR_STICKY_CHECK 1007
+#define IDC_RELEASE_KEY_EDIT    1008
+#define IDOK_BUTTON             1009
+#define IDCANCEL_BUTTON         1010
+
+// Settings Dialog - Clean, simple layout
+IDD_SETTINGS DIALOGEX 0, 0, 300, 270
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "ScreenBuddy Settings"
+FONT 9, "Segoe UI", 400, 0, 0x0
+BEGIN
+    // Video Settings
+    GROUPBOX        "Video Settings", IDC_STATIC, 10, 10, 280, 60
+    
+    LTEXT           "Framerate (FPS):", IDC_STATIC, 20, 30, 60, 10
+    EDITTEXT        IDC_FRAMERATE_EDIT, 85, 28, 40, 14, ES_NUMBER | ES_AUTOHSCROLL
+    LTEXT           "(1-120)", IDC_STATIC, 130, 30, 40, 10
+    
+    LTEXT           "Bitrate (Mbps):", IDC_STATIC, 20, 50, 60, 10
+    EDITTEXT        IDC_BITRATE_EDIT, 85, 48, 40, 14, ES_NUMBER | ES_AUTOHSCROLL
+    LTEXT           "(1-50)", IDC_STATIC, 130, 50, 40, 10
+    
+    CONTROL         "Use BT.709", IDC_BT709_CHECK, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 190, 30, 70, 10
+    CONTROL         "Full Range", IDC_FULLRANGE_CHECK, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 190, 50, 70, 10
+    
+    // Network Settings
+    GROUPBOX        "Network", IDC_STATIC, 10, 75, 280, 50
+    
+    LTEXT           "DERP Server:", IDC_STATIC, 20, 95, 60, 10
+    EDITTEXT        IDC_DERP_SERVER_EDIT, 85, 93, 120, 14, ES_AUTOHSCROLL
+    LTEXT           "Port:", IDC_STATIC, 210, 95, 25, 10
+// Add missing control ID for DERP port edit
+#define IDC_DERP_PORT_EDIT      1011
+    EDITTEXT        IDC_DERP_PORT_EDIT, 235, 93, 45, 14, ES_NUMBER | ES_AUTOHSCROLL
+    
+    LTEXT           "Log Level:", IDC_STATIC, 20, 115, 60, 10
+    COMBOBOX        IDC_LOG_LEVEL_COMBO, 85, 113, 195, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    
+    // Cursor Settings
+    GROUPBOX        "Cursor", IDC_STATIC, 10, 135, 280, 40
+    
+    CONTROL         "Confine Cursor", IDC_CURSOR_STICKY_CHECK, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 20, 155, 100, 10
+    LTEXT           "Release Key:", IDC_STATIC, 140, 155, 50, 10
+    EDITTEXT        IDC_RELEASE_KEY_EDIT, 195, 153, 80, 14, ES_AUTOHSCROLL
+    
+    // Buttons
+    DEFPUSHBUTTON   "OK", IDOK_BUTTON, 140, 250, 70, 14
+    PUSHBUTTON      "Cancel", IDCANCEL_BUTTON, 220, 250, 70, 14
+END

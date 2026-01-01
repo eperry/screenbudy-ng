@@ -1,5 +1,3 @@
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #define COBJMACROS
 #define WIN32_LEAN_AND_MEAN
 #define _CRT_SECURE_NO_DEPRECATE
@@ -64,8 +62,6 @@
 #include "ScreenBuddyPS.h"
 #include "config.h"
 #include "settings_ui.h"
-// #include "lan_discovery.h" (LAN discovery removed)
-#include "direct_connection.h"
 
 // Menu resource IDs (must match ScreenBuddy.rc)
 #define IDM_FILE_EXIT    100
@@ -194,17 +190,13 @@ static void Log_Init(void) {
 	WideCharToMultiByte(CP_UTF8, 0, LogFilePathW, -1, g_LogFilePath, MAX_PATH, NULL, NULL);
 	
 	// Use _wfopen for proper Unicode path support
-	if (_wfopen_s(&g_LogFile, LogFilePathW, L"w") != 0) {
-		g_LogFile = NULL;
-	}
+	g_LogFile = _wfopen(LogFilePathW, L"w");
 	
 	if (g_LogFile) {
 		time_t now = time(NULL);
 		fprintf(g_LogFile, "================================================================================\n");
 		fprintf(g_LogFile, "  ScreenBuddy Log - %s\n", BUDDY_VERSION_STRING);
-		char timebuf[32];
-		ctime_s(timebuf, sizeof(timebuf), &now);
-		fprintf(g_LogFile, "  Log started: %s", timebuf);
+		fprintf(g_LogFile, "  Log started: %s", ctime(&now));
 		fprintf(g_LogFile, "  Log file: %s\n", g_LogFilePath);
 		fprintf(g_LogFile, "================================================================================\n\n");
 		fflush(g_LogFile);
@@ -236,9 +228,7 @@ static void Log_Close(void) {
 	if (g_LogFile) {
 		time_t now = time(NULL);
 		fprintf(g_LogFile, "\n================================================================================\n");
-		char timebuf[32];
-		ctime_s(timebuf, sizeof(timebuf), &now);
-		fprintf(g_LogFile, "  Log ended: %s", timebuf);
+		fprintf(g_LogFile, "  Log ended: %s", ctime(&now));
 		fprintf(g_LogFile, "================================================================================\n");
 		fclose(g_LogFile);
 		g_LogFile = NULL;
@@ -246,7 +236,7 @@ static void Log_Close(void) {
 	DeleteCriticalSection(&g_LogLock);
 }
 
-void Log_Write(LogLevel level, const char* func, int line, const char* fmt, ...) {
+static void Log_Write(LogLevel level, const char* func, int line, const char* fmt, ...) {
 	if (!g_LogFile) return;
 	
 	EnterCriticalSection(&g_LogLock);
@@ -273,7 +263,7 @@ void Log_Write(LogLevel level, const char* func, int line, const char* fmt, ...)
 	LeaveCriticalSection(&g_LogLock);
 }
 
-void Log_WriteW(LogLevel level, const char* func, int line, const wchar_t* fmt, ...) {
+static void Log_WriteW(LogLevel level, const char* func, int line, const wchar_t* fmt, ...) {
 	if (!g_LogFile) return;
 	
 	EnterCriticalSection(&g_LogLock);
@@ -292,7 +282,7 @@ void Log_WriteW(LogLevel level, const char* func, int line, const wchar_t* fmt, 
 	wchar_t buffer[2048];
 	va_list args;
 	va_start(args, fmt);
-	vswprintf_s(buffer, sizeof(buffer)/sizeof(buffer[0]), fmt, args);
+	vswprintf(buffer, sizeof(buffer)/sizeof(buffer[0]), fmt, args);
 	va_end(args);
 	
 	// Convert to UTF-8 and write
@@ -349,13 +339,16 @@ static void Log_Hex(LogLevel level, const char* func, int line, const char* desc
 
 #define MF64(Hi,Lo) (((UINT64)Hi << 32) | (Lo))
 
-#define StrFormat(Buffer, ...) swprintf_s(Buffer, _countof(Buffer), __VA_ARGS__)
+#define StrFormat(Buffer, ...) _snwprintf(Buffer, _countof(Buffer), __VA_ARGS__)
 
 #define BUDDY_CLASS L"ScreenBuddyClass"
 #define BUDDY_TITLE L"Screen Buddy"
+#define BUDDY_CONFIG L"Buddy"
 
 enum
 {
+	BUDDY_CONFIG_MAXPATH	= 32 * 1024,
+
 	// encoder settings
 	BUDDY_ENCODE_FRAMERATE	= 30,
 	BUDDY_ENCODE_BITRATE	= 4 * 1000 * 1000,
@@ -385,8 +378,7 @@ enum
 	BUDDY_DISCONNECT_TIMER		= 111,
 	BUDDY_UPDATE_TITLE_TIMER	= 222,
 	BUDDY_FILE_TIMER			= 333,
-BUDDY_FRAME_TIMER			= 444,
-BUDDY_LAN_TIMER			= 555,
+	BUDDY_FRAME_TIMER			= 444,
 
 	// dialog controls
 	BUDDY_ID_SHARE_ICON			= 100,
@@ -395,13 +387,10 @@ BUDDY_LAN_TIMER			= 555,
 	BUDDY_ID_SHARE_NEW			= 130,
 	BUDDY_ID_SHARE_BUTTON		= 140,
 	BUDDY_ID_SHARE_FULLSCREEN	= 145,
-BUDDY_ID_CONNECT_ICON		= 200,
-BUDDY_ID_CONNECT_KEY		= 210,
-BUDDY_ID_CONNECT_PASTE		= 220,
-BUDDY_ID_CONNECT_BUTTON		= 230,
-BUDDY_ID_LAN_LIST			= 235,
-BUDDY_ID_LAN_REFRESH		= 236,
-BUDDY_ID_LAN_CONNECT		= 237,
+	BUDDY_ID_CONNECT_ICON		= 200,
+	BUDDY_ID_CONNECT_KEY		= 210,
+	BUDDY_ID_CONNECT_PASTE		= 220,
+	BUDDY_ID_CONNECT_BUTTON		= 230,
 
 	// window selection dialog controls
 	BUDDY_ID_WINDOW_LIST		= 300,
@@ -418,7 +407,6 @@ BUDDY_ID_LAN_CONNECT		= 237,
 	BUDDY_DIALOG_KEY_WIDTH		= 268,
 	BUDDY_DIALOG_WIDTH			= 350,
 	BUDDY_DIALOG_ICON_SIZE		= 42,
-	BUDDY_BANNER_HEIGHT			= 40,
 
 	// network packets
 	BUDDY_PACKET_VIDEO			= 0,
@@ -450,16 +438,13 @@ BuddyState;
 
 typedef struct
 {
-	bool DerpHealthOk; // Result of DERP health check
-	char DerpHealthLog[256]; // Log message from health check
+	wchar_t ConfigPath[BUDDY_CONFIG_MAXPATH];
+	
 	// loaded from config
 	uint32_t DerpRegion;
 	wchar_t DerpRegions[BUDDY_MAX_REGION_COUNT][BUDDY_MAX_HOST_LENGTH];
 	DerpKey MyPrivateKey;
 	DerpKey MyPublicKey;
-	BuddyConfig Config; // JSON config
-	
-	// LAN discovery removed
 
 	// windows stuff
 	HICON Icon;
@@ -843,90 +828,36 @@ static DWORD CALLBACK Buddy_GetBestDerpRegionThread(LPVOID Arg)
 	return 0;
 }
 
-static bool DerpHealthCheck(const BuddyConfig* cfg, char* logbuf, size_t logbuflen) {
-	WSADATA wsaData;
-	SOCKET sock = INVALID_SOCKET;
-	struct sockaddr_in server;
-	int result;
-	bool ok = false;
-	_snprintf_s(logbuf, logbuflen, logbuflen - 1, "Attempting DERP health check: %ls:%d\n", cfg->derp_server, cfg->derp_server_port);
-	result = WSAStartup(MAKEWORD(2, 2), &wsaData);
-	if (result != 0) {
-		_snprintf_s(logbuf, logbuflen, logbuflen - 1, "WSAStartup failed: %d\n", result);
-		return false;
-	}
-	sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	if (sock == INVALID_SOCKET) {
-		_snprintf_s(logbuf, logbuflen, logbuflen - 1, "socket() failed\n");
-		WSACleanup();
-		return false;
-	}
-	server.sin_family = AF_INET;
-	server.sin_port = htons(cfg->derp_server_port);
-	InetPtonA(AF_INET, "127.0.0.1", &server.sin_addr); // Only support IPv4/localhost for now
-	result = connect(sock, (struct sockaddr*)&server, sizeof(server));
-	if (result == 0) {
-		_snprintf_s(logbuf, logbuflen, logbuflen - 1, "DERP health check succeeded\n");
-		ok = true;
-	} else {
-		_snprintf_s(logbuf, logbuflen, logbuflen - 1, "DERP health check failed: %d\n", WSAGetLastError());
-	}
-	closesocket(sock);
-	WSACleanup();
-	return ok;
-}
-
 static void Buddy_LoadConfig(ScreenBuddy* Buddy)
 {
-	// Load JSON config
-	wchar_t cfgPath[MAX_PATH];
-	if (BuddyConfig_GetDefaultPath(cfgPath, MAX_PATH))
-	{
-		FILE* f = NULL;
-		_wfopen_s(&f, cfgPath, L"r");
-		if (!f) {
-			// File missing: create new valid config
-			BuddyConfig_Defaults(&Buddy->Config);
-			BuddyConfig_Save(&Buddy->Config, cfgPath);
-			LOG_INFO("Created new default config at %ls", cfgPath);
-		} else {
-			fclose(f);
-			if (!BuddyConfig_Load(&Buddy->Config, cfgPath)) {
-				MessageBoxW(NULL, L"Your ScreenBuddy config file is corrupted or invalid. Please fix or delete the file and restart.", L"Config Error", MB_OK | MB_ICONERROR);
-				LOG_ERROR("Config file is corrupted or invalid. Startup aborted.");
-				exit(1);
-			} else {
-				LOG_INFO("Loaded config from %ls", cfgPath);
-				LOG_INFO("Config after load - framerate: %d, bitrate: %d, derp_server: %ls", 
-					Buddy->Config.framerate, Buddy->Config.bitrate, Buddy->Config.derp_server);
-			}
-		}
-	} else {
-		BuddyConfig_Defaults(&Buddy->Config);
-		LOG_WARN("Could not get config path; using defaults");
-	}
+	DWORD ExePathOk = GetModuleFileNameW(NULL, Buddy->ConfigPath, ARRAYSIZE(Buddy->ConfigPath));
+	Assert(ExePathOk != 0);
 
-	// Load DERP settings from JSON config
-	Buddy->DerpRegion = Buddy->Config.derp_region;
-	
+	HR(PathCchRenameExtension(Buddy->ConfigPath, ARRAYSIZE(Buddy->ConfigPath), L".ini"));
+
+	Buddy->DerpRegion = GetPrivateProfileIntW(BUDDY_CONFIG, L"DerpRegion", 0, Buddy->ConfigPath);
+
 	for (int RegionIndex = 0; RegionIndex < BUDDY_MAX_REGION_COUNT; RegionIndex++)
 	{
-		lstrcpyW(Buddy->DerpRegions[RegionIndex], Buddy->Config.derp_regions[RegionIndex]);
+		wchar_t DerpRegionName[128];
+		StrFormat(DerpRegionName, L"DerpRegion%d", RegionIndex);
+
+		GetPrivateProfileStringW(BUDDY_CONFIG, DerpRegionName, L"", Buddy->DerpRegions[RegionIndex], ARRAYSIZE(Buddy->DerpRegions[RegionIndex]), Buddy->ConfigPath);
 	}
 
-	// Load and decrypt private key from JSON config
+	wchar_t EncryptedText[2048];
+	DWORD EncryptedTextLen = GetPrivateProfileStringW(BUDDY_CONFIG, L"DerpPrivateKey", L"", EncryptedText, ARRAYSIZE(EncryptedText), Buddy->ConfigPath);
+
 	bool PrivateKeyValid = false;
-	if (Buddy->Config.derp_private_key_hex[0] != 0)
+	if (EncryptedTextLen)
 	{
-		// Convert hex string to binary
-		size_t hexLen = strlen(Buddy->Config.derp_private_key_hex);
 		uint8_t EncryptedBlob[1024];
-		for (size_t i = 0; i < hexLen; i += 2)
+		for (size_t i = 0; i < EncryptedTextLen; i += 2)
 		{
-			sscanf_s(Buddy->Config.derp_private_key_hex + i, "%02hhx", &EncryptedBlob[i/2]);
+			swscanf(EncryptedText + i, L"%02hhx", &EncryptedBlob[i/2]);
 		}
 
-		DATA_BLOB BlobInput = { (DWORD)(hexLen / 2), EncryptedBlob };
+		DATA_BLOB BlobInput = { EncryptedTextLen, EncryptedBlob };
 		DATA_BLOB BlobOutput;
 		BOOL Decrypted = CryptUnprotectData(&BlobInput, NULL, NULL, NULL, NULL, CRYPTPROTECT_UI_FORBIDDEN, &BlobOutput);
 
@@ -936,44 +867,18 @@ static void Buddy_LoadConfig(ScreenBuddy* Buddy)
 			PrivateKeyValid = true;
 		}
 
-		if (BlobOutput.pbData) LocalFree(BlobOutput.pbData);
+		LocalFree(BlobOutput.pbData);
 	}
 
 	if (!PrivateKeyValid)
 	{
-		LOG_INFO("No valid private key found, generating new one");
 		DerpNet_CreateNewKey(&Buddy->MyPrivateKey);
-		
-		// Encrypt and save new private key to config
-		DATA_BLOB BlobInput = { sizeof(Buddy->MyPrivateKey), (BYTE*)&Buddy->MyPrivateKey };
-		DATA_BLOB BlobOutput;
-		if (CryptProtectData(&BlobInput, L"ScreenBuddy Private Key", NULL, NULL, NULL, CRYPTPROTECT_UI_FORBIDDEN, &BlobOutput))
-		{
-			// Convert encrypted blob to hex string
-			// Each byte needs 2 hex chars, so max is (sizeof-1)/2 to leave room for null terminator
-			DWORD maxBytes = (sizeof(Buddy->Config.derp_private_key_hex) - 1) / 2;
-			DWORD bytesToConvert = BlobOutput.cbData < maxBytes ? BlobOutput.cbData : maxBytes;
-			for (DWORD i = 0; i < bytesToConvert; i++)
-			{
-				sprintf_s(Buddy->Config.derp_private_key_hex + (i * 2), sizeof(Buddy->Config.derp_private_key_hex) - (i * 2), "%02x", BlobOutput.pbData[i]);
-			}
-			LocalFree(BlobOutput.pbData);
-			LOG_DEBUG("Generated and encrypted new private key");
-		}
 	}
 
 	DerpNet_GetPublicKey(&Buddy->MyPrivateKey, &Buddy->MyPublicKey);
 	
-	// Window capture from JSON config
-	Buddy->CaptureFullScreen = Buddy->Config.capture_full_screen;
-
-	// DERP health check on startup
-	Buddy->DerpHealthOk = DerpHealthCheck(&Buddy->Config, Buddy->DerpHealthLog, sizeof(Buddy->DerpHealthLog));
-	if (Buddy->DerpHealthOk) {
-		LOG_INFO("DERP health check passed");
-	} else {
-		LOG_WARN("DERP health check failed: %s", Buddy->DerpHealthLog);
-	}
+	// Load window capture preferences
+	Buddy->CaptureFullScreen = GetPrivateProfileIntW(BUDDY_CONFIG, L"CaptureFullScreen", 1, Buddy->ConfigPath) != 0;
 }
 
 //
@@ -1007,19 +912,6 @@ static void Buddy_CancelWait(ScreenBuddy* Buddy)
 	SetThreadpoolWait(Buddy->WaitCallback, NULL, NULL);
 	WaitForThreadpoolWaitCallbacks(Buddy->WaitCallback, TRUE);
 	CloseThreadpoolWait(Buddy->WaitCallback);
-}
-
-// Network abstraction is now DERP-only
-// Network abstraction is now DERP-only
-static bool Buddy_Send(ScreenBuddy* Buddy, const void* Data, size_t Size)
-{
-   return DerpNet_Send(&Buddy->Net, &Buddy->RemoteKey, Data, Size);
-}
-
-static int Buddy_Recv(ScreenBuddy* Buddy, uint8_t** OutData, uint32_t* OutSize)
-{
-   DerpKey DummyKey;
-   return DerpNet_Recv(&Buddy->Net, &DummyKey, OutData, OutSize, false);
 }
 
 //
@@ -1700,7 +1592,7 @@ static void Buddy_OutputFromEncoder(ScreenBuddy* Buddy)
 		uint32_t SendSize = min(OutputSize, sizeof(SendBuffer) - ExtraSize);
 		CopyMemory(SendBuffer + ExtraSize, OutputData, SendSize);
 
-		if (!Buddy_Send(Buddy, SendBuffer, SendSize + ExtraSize))
+		if (!DerpNet_Send(&Buddy->Net, &Buddy->RemoteKey, SendBuffer, SendSize + ExtraSize))
 		{
 			LOG_ERROR("DerpNet_Send FAILED! Frame=%d, Chunk=%d, Size=%u", s_FrameCount, ChunkCount, SendSize + ExtraSize);
 			Buddy_Disconnect(Buddy, L"DerpNet disconnect while sending data!");
@@ -2681,30 +2573,10 @@ static LRESULT CALLBACK Buddy_WindowProc(HWND Window, UINT Message, WPARAM WPara
 		return 0;
 	}
 
-
-		// Draw red banner if DERP health check failed
-	case WM_PAINT: {
-		PAINTSTRUCT ps;
-		HDC hdc = BeginPaint(Window, &ps);
-		RECT clientRect;
-		GetClientRect(Window, &clientRect);
-		if (Buddy && !Buddy->DerpHealthOk) {
-			HBRUSH redBrush = CreateSolidBrush(RGB(200, 0, 0));
-			RECT bannerRect = {0, 0, clientRect.right, BUDDY_BANNER_HEIGHT};
-			FillRect(hdc, &bannerRect, redBrush);
-			SetBkMode(hdc, TRANSPARENT);
-			SetTextColor(hdc, RGB(255,255,255));
-			HFONT oldFont = (HFONT)SelectObject(hdc, GetStockObject(DEFAULT_GUI_FONT));
-			DrawTextA(hdc, "DERP server unreachable - check config or server!", -1, &bannerRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-			SelectObject(hdc, oldFont);
-			DeleteObject(redBrush);
-		}
-		// Call original renderer (draws rest of UI)
+	case WM_PAINT:
 		Buddy_RenderWindow(Buddy);
-		EndPaint(Window, &ps);
 		ValidateRect(Window, NULL);
 		return 0;
-	}
 
 	case WM_CLOSE:
 		if (Buddy->State == BUDDY_STATE_CONNECTING)
@@ -2890,19 +2762,35 @@ static LRESULT CALLBACK Buddy_WindowProc(HWND Window, UINT Message, WPARAM WPara
 		int MenuID = LOWORD(WParam);
 		if (MenuID == IDM_EDIT_SETTINGS)
 		{
-			wprintf(L"\n[MAIN] Edit->Settings opened\n");
-			
-			// Show settings dialog (it will load from file and handle save/auto-save)
-			if (SettingsUI_Show(Window, &Buddy->Config))
+			// Get default config path
+			wchar_t configPath[MAX_PATH];
+			if (!BuddyConfig_GetDefaultPath(configPath, MAX_PATH))
 			{
-				wprintf(L"[MAIN] Settings dialog returned OK - applying changes\n");
-				// Changes are already saved and applied by the dialog
-				// Just make sure Buddy->Config is updated
-				LOG_INFO("Settings changed and applied");
+				MessageBoxW(Window, L"Failed to get configuration path.", L"Error", MB_OK | MB_ICONERROR);
+				return 0;
 			}
-			else
+			
+			// Load current config (or use defaults if file doesn't exist)
+			BuddyConfig config;
+			if (!BuddyConfig_Load(&config, configPath))
 			{
-				wprintf(L"[MAIN] Settings dialog cancelled\n");
+				BuddyConfig_Defaults(&config);
+			}
+			
+			// Show settings dialog
+			if (SettingsUI_Show(Window, &config))
+			{
+				// User clicked OK - save the configuration
+				if (BuddyConfig_Save(&config, configPath))
+				{
+					LOG_INFO("Settings saved successfully");
+					MessageBoxW(Window, L"Settings saved successfully!\n\nNote: Some settings may require restarting ScreenBuddy to take effect.", L"Settings Saved", MB_OK | MB_ICONINFORMATION);
+				}
+				else
+				{
+					LOG_ERROR("Failed to save settings");
+					MessageBoxW(Window, L"Failed to save settings to config file.", L"Error", MB_OK | MB_ICONERROR);
+				}
 			}
 		}
 		else if (MenuID == IDM_FILE_EXIT)
@@ -3195,15 +3083,13 @@ static bool Buddy_ShowWindowList(ScreenBuddy* Buddy)
 		{
 			Buddy->CaptureFullScreen = true;
 			Buddy->SelectedWindow = NULL;
-			Buddy->Config.capture_full_screen = true;
-			// Only update in-memory config, do not save to disk
+			WritePrivateProfileStringW(BUDDY_CONFIG, L"CaptureFullScreen", L"1", Buddy->ConfigPath);
 		}
 		else
 		{
 			Buddy->SelectedWindow = Result.SelectedWindow;
 			Buddy->CaptureFullScreen = false;
-			Buddy->Config.capture_full_screen = false;
-			// Only update in-memory config, do not save to disk
+			WritePrivateProfileStringW(BUDDY_CONFIG, L"CaptureFullScreen", L"0", Buddy->ConfigPath);
 		}
 		return true;
 	}
@@ -3305,19 +3191,24 @@ static bool Buddy_StartSharing(ScreenBuddy* Buddy)
 			LOG_INFO("Video encoder created successfully");
 			
 			char DerpHostName[256];
-			// Always use manually specified derp_server from config
-			WideCharToMultiByte(CP_UTF8, 0, Buddy->Config.derp_server, -1, DerpHostName, ARRAYSIZE(DerpHostName), NULL, NULL);
+			if (DERPNET_USE_PLAIN_HTTP)
+			{
+				lstrcpyA(DerpHostName, "127.0.0.1");
+			}
+			else
+			{
+				WideCharToMultiByte(CP_UTF8, 0, Buddy->DerpRegions[Buddy->DerpRegion], -1, DerpHostName, ARRAYSIZE(DerpHostName), NULL, NULL);
+			}
 
 			LOG_NET("========================================");
 			LOG_NET("DERP SERVER CONNECTION (Sharing)");
 			LOG_NET("========================================");
 			LOG_NET("Host: %s", DerpHostName);
-			LOG_NET("Port: %d", Buddy->Config.derp_server_port);
+			LOG_NET("Port: %s", DERPNET_USE_PLAIN_HTTP ? "8080" : "8443");
 			LOG_NET("TLS: %s", DERPNET_USE_PLAIN_HTTP ? "DISABLED (plain HTTP)" : "ENABLED (HTTPS)");
 			LOG_HEX("Private Key", &Buddy->MyPrivateKey, sizeof(Buddy->MyPrivateKey));
 
 			LOG_NET("Attempting DerpNet_Open...");
-			// TODO: Pass port to DerpNet_Open if supported, or set global/struct
 			if (DerpNet_Open(&Buddy->Net, DerpHostName, &Buddy->MyPrivateKey))
 			{
 				LOG_NET("DerpNet_Open SUCCESS - Connection established!");
@@ -3328,9 +3219,8 @@ static bool Buddy_StartSharing(ScreenBuddy* Buddy)
 			else
 			{
 				LOG_ERROR("DerpNet_Open FAILED - Could not connect to server!");
-				LOG_ERROR("Host: %s, Port: %d", DerpHostName, Buddy->Config.derp_server_port);
-				LOG_ERROR("See derp_debug.log for detailed DERP connection diagnostics, TLS errors, and handshake steps.");
-				MessageBoxW(Buddy->DialogWindow, L"Cannot connect to DerpNet server!\n\nPlease check:\n- Docker container is running: docker ps\n- Internet connection and firewall settings\n- See derp_debug.log for DERP connection details and error codes.", L"Error", MB_ICONERROR);
+				LOG_ERROR("Host: %s, Port: %s", DerpHostName, DERPNET_USE_PLAIN_HTTP ? "8080" : "8443");
+				MessageBoxW(Buddy->DialogWindow, L"Cannot connect to DerpNet server!\n\nPlease check:\n- Docker container is running: docker ps\n- Internet connection and firewall settings", L"Error", MB_ICONERROR);
 				IMFShutdown* Shutdown;
 				if (SUCCEEDED(IMFTransform_QueryInterface(Buddy->Codec, &IID_IMFShutdown, (void**)&Shutdown)))
 				{
@@ -3375,8 +3265,7 @@ static bool Buddy_StartConnection(ScreenBuddy* Buddy)
 	}
 
 	wchar_t ConnectKey[BUDDY_KEY_TEXT_MAX];
-	HWND connectCombo = GetDlgItem(Buddy->DialogWindow, BUDDY_ID_CONNECT_KEY);
-	int ConnectKeyLength = GetWindowTextW(connectCombo, ConnectKey, ARRAYSIZE(ConnectKey));
+	int ConnectKeyLength = Edit_GetText(GetDlgItem(Buddy->DialogWindow, BUDDY_ID_CONNECT_KEY), ConnectKey, ARRAYSIZE(ConnectKey));
 	LOG_INFOW(L"Connection code entered: %s (length=%d)", ConnectKey, ConnectKeyLength);
 	
 	if (ConnectKeyLength != 2 + 2 * 32)
@@ -3387,12 +3276,12 @@ static bool Buddy_StartConnection(ScreenBuddy* Buddy)
 	}
 
 	uint8_t Region;
-	swscanf_s(ConnectKey, L"%02hhx", &Region);
+	swscanf(ConnectKey, L"%02hhx", &Region);
 	LOG_INFO("Parsed region: %d", Region);
 	
 	for (int i = 0; i < 32; i++)
 	{
-		swscanf_s(ConnectKey + 2 + 2 * i, L"%02hhx", &Buddy->RemoteKey.Bytes[i]);
+		swscanf(ConnectKey + 2 + 2 * i, L"%02hhx", &Buddy->RemoteKey.Bytes[i]);
 	}
 	LOG_HEX("Remote Public Key", &Buddy->RemoteKey, sizeof(Buddy->RemoteKey));
 
@@ -3402,9 +3291,6 @@ static bool Buddy_StartConnection(ScreenBuddy* Buddy)
 		return false;
 	}
 	LOG_INFO("Video decoder created successfully");
-
-	// CONNECT VIA DERP
-	// LAN mode removed; always DERP
 
 	DerpKey NewPrivateKey;
 	DerpNet_CreateNewKey(&NewPrivateKey);
@@ -3513,15 +3399,12 @@ static void Buddy_NetworkEvent(ScreenBuddy* Buddy)
 		DerpKey RecvKey;
 		uint8_t* RecvData;
 		uint32_t RecvSize;
-		
-		int Recv;
-		   Recv = DerpNet_Recv(&Buddy->Net, &RecvKey, &RecvData, &RecvSize, false);
+		int Recv = DerpNet_Recv(&Buddy->Net, &RecvKey, &RecvData, &RecvSize, false);
 		if (Recv < 0)
 		{
-			size_t totalSent = Buddy->Net.TotalSent;
-			size_t totalRecv = Buddy->Net.TotalReceived;
-			LOG_ERROR("Network disconnected (sent=%zu, recv=%zu)", totalSent, totalRecv);
-			Buddy_Disconnect(Buddy, L"DERP server disconnected!");
+			LOG_ERROR("DerpNet_Recv returned %d - Server disconnected! (TotalSent=%zu, TotalRecv=%zu)", 
+				Recv, Buddy->Net.TotalSent, Buddy->Net.TotalReceived);
+			Buddy_Disconnect(Buddy, L"DerpNet server disconnected!");
 			break;
 		}
 		else if (Recv == 0)
@@ -3794,7 +3677,7 @@ static void Buddy_NetworkEvent(ScreenBuddy* Buddy)
 						Buddy->FileLastSize = 0;
 
 						uint8_t Data[1] = { BUDDY_PACKET_FILE_ACCEPT };
-						Buddy_Send(Buddy, Data, sizeof(Data));
+						DerpNet_Send(&Buddy->Net, &Buddy->RemoteKey, Data, sizeof(Data));
 
 						TASKDIALOGCONFIG Config =
 						{
@@ -3881,11 +3764,11 @@ static void Dialog_SetTooltip(HWND Dialog, int Control, const char* Text, HWND T
 static void Dialog_ShowShareKey(HWND Control, uint32_t Region, DerpKey* Key)
 {
 	wchar_t Text[2 + 32 * 2 + 1];
-	swprintf_s(Text, ARRAYSIZE(Text), L"%02hhx", Region);
+	_swprintf(Text, L"%02hhx", Region);
 
 	for (size_t i = 0; i < sizeof(Key->Bytes); i++)
 	{
-		swprintf_s(Text + 2 + 2 * i, ARRAYSIZE(Text) - (2 + 2 * i), L"%02hhx", Key->Bytes[i]);
+		_swprintf(Text + 2 + 2 * i, L"%02hhx", Key->Bytes[i]);
 	}
 
 	Edit_SetText(Control, Text);
@@ -3897,28 +3780,6 @@ static INT_PTR CALLBACK Buddy_DialogProc(HWND Dialog, UINT Message, WPARAM WPara
 
 	switch (Message)
 	{
-		case WM_PAINT: {
-			ScreenBuddy* Buddy = (void*)GetWindowLongPtr(Dialog, GWLP_USERDATA);
-			if (Buddy && !Buddy->DerpHealthOk) {
-				PAINTSTRUCT ps;
-				HDC hdc = BeginPaint(Dialog, &ps);
-				RECT clientRect;
-				GetClientRect(Dialog, &clientRect);
-				int bannerHeight = 40;
-				HBRUSH redBrush = CreateSolidBrush(RGB(200, 0, 0));
-				RECT bannerRect = {0, 0, clientRect.right, bannerHeight};
-				FillRect(hdc, &bannerRect, redBrush);
-				SetBkMode(hdc, TRANSPARENT);
-				SetTextColor(hdc, RGB(255,255,255));
-				HFONT oldFont = (HFONT)SelectObject(hdc, GetStockObject(DEFAULT_GUI_FONT));
-				DrawTextA(hdc, "DERP server unreachable - check config or server!", -1, &bannerRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-				SelectObject(hdc, oldFont);
-				DeleteObject(redBrush);
-				EndPaint(Dialog, &ps);
-				// Do not return, allow default dialog painting after banner
-			}
-			break;
-		}
 	case WM_INITDIALOG:
 		Buddy = (void*)LParam;
 		SetWindowLongPtrW(Dialog, GWLP_USERDATA, (LONG_PTR)Buddy);
@@ -3934,6 +3795,7 @@ static INT_PTR CALLBACK Buddy_DialogProc(HWND Dialog, UINT Message, WPARAM WPara
 
 		Dialog_SetTooltip(Dialog, BUDDY_ID_SHARE_COPY, "Copy", TooltipWindow);
 		Dialog_SetTooltip(Dialog, BUDDY_ID_SHARE_NEW, "Generate New Code", TooltipWindow);
+		Dialog_SetTooltip(Dialog, BUDDY_ID_CONNECT_PASTE, "Paste", TooltipWindow);
 
 		HWND ShareKey = GetDlgItem(Dialog, BUDDY_ID_SHARE_KEY);
 
@@ -4028,7 +3890,6 @@ static INT_PTR CALLBACK Buddy_DialogProc(HWND Dialog, UINT Message, WPARAM WPara
 			Buddy->DialogFont = NULL;
 		}
 
-		// LAN discovery cleanup removed
 		ExitProcess(0);
 		return TRUE;
 
@@ -4075,8 +3936,6 @@ static INT_PTR CALLBACK Buddy_DialogProc(HWND Dialog, UINT Message, WPARAM WPara
 	case WM_COMMAND:
 	{
 		int Control = LOWORD(WParam);
-		int Notification = HIWORD(WParam);
-		
 		if (Control == BUDDY_ID_SHARE_COPY)
 		{
 			if (OpenClipboard(NULL))
@@ -4119,12 +3978,7 @@ static INT_PTR CALLBACK Buddy_DialogProc(HWND Dialog, UINT Message, WPARAM WPara
 				BOOL Protected = CryptProtectData(&BlobInput, NULL, NULL, NULL, NULL, CRYPTPROTECT_UI_FORBIDDEN, &BlobOutput);
 				Assert(Protected);
 
-				// Convert encrypted blob to hex string and save to JSON
-				for (DWORD i = 0; i < BlobOutput.cbData && i < 512; i++)
-				{
-					sprintf_s(Buddy->Config.derp_private_key_hex + (i * 2), sizeof(Buddy->Config.derp_private_key_hex) - (i * 2), "%02x", BlobOutput.pbData[i]);
-				}
-				BuddyConfig_SaveDefault(&Buddy->Config);
+				WritePrivateProfileStructW(BUDDY_CONFIG, L"DerpPrivateKey", BlobOutput.pbData, BlobOutput.cbData, Buddy->ConfigPath);
 				LocalFree(BlobOutput.pbData);
 
 				Dialog_ShowShareKey(GetDlgItem(Dialog, BUDDY_ID_SHARE_KEY), Buddy->DerpRegion, &Buddy->MyPublicKey);
@@ -4189,20 +4043,36 @@ static INT_PTR CALLBACK Buddy_DialogProc(HWND Dialog, UINT Message, WPARAM WPara
 		}
 		else if (Control == IDM_EDIT_SETTINGS)
 		{
-			wprintf(L"\n[BUDDY_DIALOG] Edit->Settings opened\n");
+			// Get default config path
+			wchar_t configPath[MAX_PATH];
+			if (!BuddyConfig_GetDefaultPath(configPath, MAX_PATH))
+			{
+				MessageBoxW(Dialog, L"Failed to get configuration path.", L"Error", MB_OK | MB_ICONERROR);
+				return TRUE;
+			}
 			
-			// Show settings dialog (it will load from file and handle save/auto-save)
-			if (SettingsUI_Show(Dialog, &Buddy->Config))
+			// Load current config (or use defaults if file doesn't exist)
+			BuddyConfig config;
+			if (!BuddyConfig_Load(&config, configPath))
 			{
-				wprintf(L"[BUDDY_DIALOG] Settings dialog returned OK - applying changes\n");
-				// Changes are already saved and applied by the dialog
-				LOG_INFO("Settings changed and applied");
+				BuddyConfig_Defaults(&config);
 			}
-			else
+			
+			// Show settings dialog
+			if (SettingsUI_Show(Dialog, &config))
 			{
-				wprintf(L"[BUDDY_DIALOG] Settings dialog cancelled\n");
+				// User clicked OK - save the configuration
+				if (BuddyConfig_Save(&config, configPath))
+				{
+					LOG_INFO("Settings saved successfully");
+					MessageBoxW(Dialog, L"Settings saved successfully!\n\nNote: Some settings may require restarting ScreenBuddy to take effect.", L"Settings Saved", MB_OK | MB_ICONINFORMATION);
+				}
+				else
+				{
+					LOG_ERROR("Failed to save settings");
+					MessageBoxW(Dialog, L"Failed to save settings to config file.", L"Error", MB_OK | MB_ICONERROR);
+				}
 			}
-			return TRUE;
 		}
 		else if (Control == IDM_FILE_EXIT)
 		{
@@ -4225,18 +4095,19 @@ static INT_PTR CALLBACK Buddy_DialogProc(HWND Dialog, UINT Message, WPARAM WPara
 		}
 		Buddy->DerpRegion = (uint32_t)WParam;
 
-		LOG_INFO("DERP region thread completed, updating region to %u", Buddy->DerpRegion);
-		LOG_INFO("Using single Buddy->Config - framerate: %d, bitrate: %d, derp_server: %ls", 
-			Buddy->Config.framerate, Buddy->Config.bitrate, Buddy->Config.derp_server);
-		
-		// Update DERP region in the single config object
-		Buddy->Config.derp_region = Buddy->DerpRegion;
+		wchar_t DerpRegionText[128];
+		StrFormat(DerpRegionText, L"%u", Buddy->DerpRegion);
+		WritePrivateProfileStringW(BUDDY_CONFIG, L"DerpRegion", DerpRegionText, Buddy->ConfigPath);
+
 		for (int RegionIndex = 0; RegionIndex < BUDDY_MAX_REGION_COUNT; RegionIndex++)
 		{
-			lstrcpyW(Buddy->Config.derp_regions[RegionIndex], Buddy->DerpRegions[RegionIndex]);
+			if (Buddy->DerpRegions[RegionIndex][0])
+			{
+				wchar_t DerpRegionName[128];
+				StrFormat(DerpRegionName, L"DerpRegion%d", RegionIndex);
+				WritePrivateProfileStringW(BUDDY_CONFIG, DerpRegionName, Buddy->DerpRegions[RegionIndex], Buddy->ConfigPath);
+			}
 		}
-		
-		LOG_INFO("Updated DERP region (not saved to disk)");
 
 		Button_Enable(GetDlgItem(Buddy->DialogWindow, BUDDY_ID_SHARE_BUTTON), TRUE);
 
@@ -4295,8 +4166,6 @@ enum
 	BUDDY_DIALOG_BUTTON		= 0x0080,
 	BUDDY_DIALOG_EDIT		= 0x0081,
 	BUDDY_DIALOG_LABEL		= 0x0082,
-	BUDDY_DIALOG_LISTBOX	= 0x0083,
-	BUDDY_DIALOG_COMBOBOX	= 0x0085,
 
 	// extra flags for items
 	BUDDY_DIALOG_NEW_LINE	= 1<<0,
@@ -4319,7 +4188,7 @@ typedef struct
 	const uint16_t Control;
 	const uint16_t Width;
 	const uint16_t Flags;
-	const uint16_t Height;
+	const uint16_t Height; // optional per-item height (0 = default)
 }
 Buddy_DialogItem;
 
@@ -4418,8 +4287,7 @@ static void Buddy_DoDialogLayout(const Buddy_DialogLayout* Dialog, void* Buffer,
 	int ItemCount = 0;
 
 	int GroupX = BUDDY_DIALOG_PADDING;
-	// Reserve space at top for banner (whether visible or not)
-	int GroupY = BUDDY_BANNER_HEIGHT;
+	int GroupY = BUDDY_DIALOG_PADDING;
 
 	for (const Buddy_DialogGroup* Group = Dialog->Groups; Group->Caption; Group++)
 	{
@@ -4464,20 +4332,11 @@ static void Buddy_DoDialogLayout(const Buddy_DialogLayout* Dialog, void* Buffer,
 				}
 				Style |= WS_BORDER;
 			}
-			if (Item->Control == BUDDY_DIALOG_LISTBOX)
-			{
-				Style |= WS_BORDER | WS_VSCROLL | LBS_NOTIFY | LBS_HASSTRINGS | LBS_DISABLENOSCROLL;
-			}
-			if (Item->Control == BUDDY_DIALOG_COMBOBOX)
-			{
-				Style |= WS_VSCROLL | CBS_DROPDOWN | CBS_HASSTRINGS | CBS_AUTOHSCROLL;
-			}
 
-			int ItemExtraY = (Item->Control == BUDDY_DIALOG_EDIT || Item->Control == BUDDY_DIALOG_COMBOBOX || Item->Width) ? -2 : 0;
+			int ItemExtraY = (Item->Control == BUDDY_DIALOG_EDIT || Item->Width) ? -2 : 0;
 			int ItemWidth = Item->Width ? Item->Width : W;
-			int ItemHeight = Item->Height ? Item->Height : BUDDY_DIALOG_ITEM_HEIGHT;
 
-			Data = Dialog__DoItem(Data, Item->Text, Item->Id, Item->Control, Style, X, Y + ItemExtraY, ItemWidth, ItemHeight);
+			Data = Dialog__DoItem(Data, Item->Text, Item->Id, Item->Control, Style, X, Y + ItemExtraY, ItemWidth, BUDDY_DIALOG_ITEM_HEIGHT);
 			ItemCount++;
 
 			if (Item->Flags & BUDDY_DIALOG_NEW_LINE)
@@ -4496,7 +4355,7 @@ static void Buddy_DoDialogLayout(const Buddy_DialogLayout* Dialog, void* Buffer,
 
 	*Template = (DLGTEMPLATE)
 	{
-		.style = DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_THICKFRAME,
+		.style = DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
 		.dwExtendedStyle = WS_EX_APPWINDOW,
 		.cdit = ItemCount,
 		.cx = BUDDY_DIALOG_PADDING + BUDDY_DIALOG_WIDTH + BUDDY_DIALOG_PADDING,
@@ -4521,12 +4380,12 @@ static HWND Buddy_CreateDialog(ScreenBuddy* Buddy)
 				.IconId = BUDDY_ID_SHARE_ICON,
 				.Items = (Buddy_DialogItem[])
 				{
-					{ BUDDY_VERSION_STRING,								0,						BUDDY_DIALOG_LABEL,		0,							BUDDY_DIALOG_NEW_LINE,	0 },
-					{ "Use the following code to share your screen:",	0,						BUDDY_DIALOG_LABEL,		0,							BUDDY_DIALOG_NEW_LINE,	0 },
-					{ "",												BUDDY_ID_SHARE_KEY,		BUDDY_DIALOG_EDIT,		BUDDY_DIALOG_KEY_WIDTH,		BUDDY_DIALOG_READ_ONLY,	0 },
-					{ "\xEE\x85\xAF",									BUDDY_ID_SHARE_COPY,	BUDDY_DIALOG_BUTTON,	BUDDY_DIALOG_BUTTON_SMALL,							0 },
-					{ "\xEE\x84\x97",									BUDDY_ID_SHARE_NEW,		BUDDY_DIALOG_BUTTON,	BUDDY_DIALOG_BUTTON_SMALL,	BUDDY_DIALOG_NEW_LINE,	0 },
-					{ "Share",											BUDDY_ID_SHARE_BUTTON,	BUDDY_DIALOG_BUTTON,	BUDDY_DIALOG_BUTTON_WIDTH,	BUDDY_DIALOG_NEW_LINE,	0 },
+					{ BUDDY_VERSION_STRING,								0,						BUDDY_DIALOG_LABEL,		0,							BUDDY_DIALOG_NEW_LINE,	},
+					{ "Use the following code to share your screen:",	0,						BUDDY_DIALOG_LABEL,		0,							BUDDY_DIALOG_NEW_LINE,	},
+					{ "",												BUDDY_ID_SHARE_KEY,		BUDDY_DIALOG_EDIT,		BUDDY_DIALOG_KEY_WIDTH,		BUDDY_DIALOG_READ_ONLY,	},
+					{ "\xEE\x85\xAF",									BUDDY_ID_SHARE_COPY,	BUDDY_DIALOG_BUTTON,	BUDDY_DIALOG_BUTTON_SMALL,							},
+					{ "\xEE\x84\x97",									BUDDY_ID_SHARE_NEW,		BUDDY_DIALOG_BUTTON,	BUDDY_DIALOG_BUTTON_SMALL,	BUDDY_DIALOG_NEW_LINE,	},
+					{ "Share",											BUDDY_ID_SHARE_BUTTON,	BUDDY_DIALOG_BUTTON,	BUDDY_DIALOG_BUTTON_WIDTH,	BUDDY_DIALOG_NEW_LINE,	},
 					{ NULL },
 				},
 			},
@@ -4536,9 +4395,10 @@ static HWND Buddy_CreateDialog(ScreenBuddy* Buddy)
 				.IconId = BUDDY_ID_CONNECT_ICON,
 				.Items = (Buddy_DialogItem[])
 				{
-					{ "Enter code:",									0,							BUDDY_DIALOG_LABEL,		0,							BUDDY_DIALOG_NEW_LINE,	0 },
-					{ "",												BUDDY_ID_CONNECT_KEY,		BUDDY_DIALOG_EDIT,		BUDDY_DIALOG_KEY_WIDTH,		BUDDY_DIALOG_NEW_LINE,	0 },
-					{ "Connect",										BUDDY_ID_CONNECT_BUTTON,	BUDDY_DIALOG_BUTTON,	BUDDY_DIALOG_BUTTON_WIDTH,	BUDDY_DIALOG_NEW_LINE,	0 },
+					{ "Enter code for remote computer to connect to:",	0,							BUDDY_DIALOG_LABEL,		0,							BUDDY_DIALOG_NEW_LINE,	},
+					{ "",												BUDDY_ID_CONNECT_KEY,		BUDDY_DIALOG_EDIT,		BUDDY_DIALOG_KEY_WIDTH,								},
+					{ "\xEE\x85\xAD",									BUDDY_ID_CONNECT_PASTE,		BUDDY_DIALOG_BUTTON,	BUDDY_DIALOG_BUTTON_SMALL,	BUDDY_DIALOG_NEW_LINE,	},
+					{ "Connect",										BUDDY_ID_CONNECT_BUTTON,	BUDDY_DIALOG_BUTTON,	BUDDY_DIALOG_BUTTON_WIDTH,	BUDDY_DIALOG_NEW_LINE,	},
 					{ NULL },
 				},
 			},
@@ -4575,20 +4435,15 @@ static HWND Buddy_CreateDialog(ScreenBuddy* Buddy)
 	return dialog;
 }
 
-// No longer using global static Buddy - allocated per instance in WinMain
+static ScreenBuddy Buddy;
 
+#ifndef NDEBUG
 int WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR cmdline, int cmdshow)
+#else
+void WinMainCRTStartup()
+#endif
 {
-	// Allocate Buddy instance on heap instead of global static
-	// This allows multiple instances to run independently
-	ScreenBuddy* Buddy = (ScreenBuddy*)malloc(sizeof(ScreenBuddy));
-	if (!Buddy)
-	{
-		MessageBoxW(NULL, L"Failed to allocate memory for Buddy instance!", L"Error", MB_ICONERROR);
-		ExitProcess(1);
-	}
-	
-	ZeroMemory(Buddy, sizeof(*Buddy));
+	ZeroMemory(&Buddy, sizeof(Buddy));
 	
 	// Initialize logging system first
 	Log_Init();
@@ -4604,32 +4459,22 @@ int WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR cmdline, int cmdshow)
 	HR(MFStartup(MF_VERSION, MFSTARTUP_LITE));
 	LOG_DEBUG("Media Foundation initialized");
 
-	Buddy->HttpSession = WinHttpOpen(NULL, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-	if (!Buddy->HttpSession)
-	{
-		MessageBoxW(NULL, L"Failed to create WinHTTP session!", L"Error", MB_ICONERROR);
-		free(Buddy);
-		ExitProcess(1);
-	}
+	Buddy.HttpSession = WinHttpOpen(NULL, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+	Assert(Buddy.HttpSession);
 	LOG_DEBUG("WinHTTP session created");
 
 	LARGE_INTEGER Freq;
 	QueryPerformanceFrequency(&Freq);
-	Buddy->Freq = Freq.QuadPart;
+	Buddy.Freq = Freq.QuadPart;
 
 	WSADATA WsaData;
 	int WsaOk = WSAStartup(MAKEWORD(2, 2), &WsaData);
-	if (WsaOk != 0)
-	{
-		MessageBoxW(NULL, L"Failed to initialize Winsock!", L"Error", MB_ICONERROR);
-		free(Buddy);
-		ExitProcess(1);
-	}
+	Assert(WsaOk == 0);
 	LOG_NET("Winsock initialized: version %d.%d", LOBYTE(WsaData.wVersion), HIBYTE(WsaData.wVersion));
 
 	//
 
-	Buddy_LoadConfig(Buddy);
+	Buddy_LoadConfig(&Buddy);
 	LOG_INFO("Configuration loaded");
 
 	{
@@ -4640,25 +4485,24 @@ int WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR cmdline, int cmdshow)
 		HRESULT hr = D3D11CreateDevice(
 			NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, Flags,
 			(D3D_FEATURE_LEVEL[]) { D3D_FEATURE_LEVEL_11_0 }, 1,
-			D3D11_SDK_VERSION, &Buddy->Device, NULL, &Buddy->Context);
+			D3D11_SDK_VERSION, &Buddy.Device, NULL, &Buddy.Context);
 		if (FAILED(hr))
 		{
 			MessageBoxW(NULL, L"Cannot create D3D11 device!", L"Error", MB_ICONERROR);
-			free(Buddy);
 			ExitProcess(0);
 		}
 
 		ID3D11InfoQueue* Info;
 		if (Flags & D3D11_CREATE_DEVICE_DEBUG)
 		{
-			HR(ID3D11Device_QueryInterface(Buddy->Device, &IID_ID3D11InfoQueue, (void**)&Info));
+			HR(ID3D11Device_QueryInterface(Buddy.Device, &IID_ID3D11InfoQueue, (void**)&Info));
 			HR(ID3D11InfoQueue_SetBreakOnSeverity(Info, D3D11_MESSAGE_SEVERITY_CORRUPTION, TRUE));
 			HR(ID3D11InfoQueue_SetBreakOnSeverity(Info, D3D11_MESSAGE_SEVERITY_ERROR, TRUE));
 			ID3D11InfoQueue_Release(Info);
 		}
 
 		ID3D11Multithread* Multithread;
-		HR(ID3D11DeviceContext_QueryInterface(Buddy->Context, &IID_ID3D11Multithread, (void**)&Multithread));
+		HR(ID3D11DeviceContext_QueryInterface(Buddy.Context, &IID_ID3D11Multithread, (void**)&Multithread));
 		HR(ID3D11Multithread_SetMultithreadProtected(Multithread, TRUE));
 		ID3D11Multithread_Release(Multithread);
 	}
@@ -4676,29 +4520,18 @@ int WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR cmdline, int cmdshow)
 		.lpszClassName = BUDDY_CLASS,
 	};
 
-	// RegisterClassExW returns 0 if already registered (which is fine for multiple instances)
-	RegisterClassExW(&WindowClass);
+	ATOM Atom = RegisterClassExW(&WindowClass);
+	Assert(Atom);
 
-	Buddy->Icon = WindowClass.hIcon;
-	if (!Buddy->Icon)
-	{
-		MessageBoxW(NULL, L"Failed to load application icon!", L"Error", MB_ICONERROR);
-		free(Buddy);
-		ExitProcess(1);
-	}
+	Buddy.Icon = WindowClass.hIcon;
+	Assert(Buddy.Icon);
 
 	//
 
-	Buddy->DialogWindow = Buddy_CreateDialog(Buddy);
-	if (!Buddy->DialogWindow)
-	{
-		LOG_ERROR("Failed to create dialog window!");
-		MessageBoxW(NULL, L"Failed to create dialog window!", L"Error", MB_ICONERROR);
-		free(Buddy);
-		ExitProcess(1);
-	}
+	Buddy.DialogWindow = Buddy_CreateDialog(&Buddy);
+	Assert(Buddy.DialogWindow);
 
-	ShowWindow(Buddy->DialogWindow, SW_NORMAL);
+	ShowWindow(Buddy.DialogWindow, SW_NORMAL);
 
 	//
 
@@ -4708,16 +4541,16 @@ int WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR cmdline, int cmdshow)
 		BOOL Result = GetMessageW(&Message, NULL, 0, 0);
 		if (Result == 0)
 		{
-			free(Buddy);
 			ExitProcess(0);
 		}
 		Assert(Result > 0);
 
-		if (!IsDialogMessageW(Buddy->DialogWindow, &Message))
+		if (!IsDialogMessageW(Buddy.DialogWindow, &Message))
 		{
 			TranslateMessage(&Message);
 			DispatchMessageW(&Message);
 		}
 	}
 }
+
 
