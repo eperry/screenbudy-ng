@@ -31,6 +31,8 @@ echo.
 test_main.exe
 set TEST_RESULT=!ERRORLEVEL!
 
+del test_main.exe >nul 2>&1
+
 echo.
 if !TEST_RESULT! EQU 0 (
   echo All tests passed!
