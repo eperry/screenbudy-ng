@@ -421,8 +421,8 @@ BUDDY_ID_LAN_CONNECT		= 237,
 	BUDDY_DIALOG_ITEM_HEIGHT	= 16,  // Very tight spacing
 	BUDDY_DIALOG_BUTTON_WIDTH	= 45,  // 50% smaller buttons
 	BUDDY_DIALOG_BUTTON_SMALL	= 13,  // 50% smaller icon buttons
-	BUDDY_DIALOG_KEY_WIDTH		= 340, // Code display width
-	BUDDY_DIALOG_WIDTH			= 400, // Narrower for compact layout
+	BUDDY_DIALOG_KEY_WIDTH		= 360, // Wider code display to prevent cutoff
+	BUDDY_DIALOG_WIDTH			= 440, // Wider to accommodate all content
 	BUDDY_DIALOG_ICON_SIZE		= 32,  // Smaller icons
 	BUDDY_BANNER_HEIGHT			= 25,
 
@@ -3965,7 +3965,7 @@ static INT_PTR CALLBACK Buddy_DialogProc(HWND Dialog, UINT Message, WPARAM WPara
 				HDC hdc = BeginPaint(Dialog, &ps);
 				RECT clientRect;
 				GetClientRect(Dialog, &clientRect);
-				int bannerHeight = 40;
+				int bannerHeight = BUDDY_BANNER_HEIGHT;
 				HBRUSH redBrush = CreateSolidBrush(RGB(200, 0, 0));
 				RECT bannerRect = {0, 0, clientRect.right, bannerHeight};
 				FillRect(hdc, &bannerRect, redBrush);
@@ -3975,6 +3975,29 @@ static INT_PTR CALLBACK Buddy_DialogProc(HWND Dialog, UINT Message, WPARAM WPara
 				DrawTextA(hdc, "DERP server unreachable - check config or server!", -1, &bannerRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 				SelectObject(hdc, oldFont);
 				DeleteObject(redBrush);
+				
+				// Shift all dialog controls down to make room for banner
+				static bool controlsShifted = false;
+				if (!controlsShifted) {
+					HWND child = GetWindow(Dialog, GW_CHILD);
+					while (child) {
+						RECT rect;
+						GetWindowRect(child, &rect);
+						POINT pt = {rect.left, rect.top};
+						ScreenToClient(Dialog, &pt);
+						SetWindowPos(child, NULL, pt.x, pt.y + bannerHeight, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+						child = GetWindow(child, GW_HWNDNEXT);
+					}
+					controlsShifted = true;
+					
+					// Resize dialog window to accommodate banner
+					RECT dialogRect;
+					GetWindowRect(Dialog, &dialogRect);
+					int width = dialogRect.right - dialogRect.left;
+					int height = dialogRect.bottom - dialogRect.top;
+					SetWindowPos(Dialog, NULL, 0, 0, width, height + bannerHeight, SWP_NOMOVE | SWP_NOZORDER);
+				}
+				
 				EndPaint(Dialog, &ps);
 				// Do not return, allow default dialog painting after banner
 			}
@@ -4649,8 +4672,8 @@ static void Buddy_DoDialogLayout(const Buddy_DialogLayout* Dialog, void* Buffer,
 	int ItemCount = 0;
 
 	int GroupX = BUDDY_DIALOG_PADDING;
-	// Reserve space at top for banner (whether visible or not)
-	int GroupY = BUDDY_BANNER_HEIGHT;
+	// Only reserve space for banner if DERP health check failed
+	int GroupY = BUDDY_DIALOG_PADDING;  // Start at top, will be adjusted per window
 
 	for (const Buddy_DialogGroup* Group = Dialog->Groups; Group->Caption; Group++)
 	{
