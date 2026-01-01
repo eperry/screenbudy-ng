@@ -439,11 +439,21 @@ BUDDY_ID_LAN_CONNECT		= 237,
 	BUDDY_PACKET_FILE_REJECT	= 7,
 	BUDDY_PACKET_FILE_DATA		= 8,
 	BUDDY_PACKET_KEYBOARD		= 9,
+	BUDDY_PACKET_VIDEO_CONFIG	= 10,
 
 	// window selection
 	BUDDY_MAX_WINDOW_COUNT		= 256,
 	BUDDY_WINDOW_TITLE_MAX		= 512,
 };
+
+typedef struct
+{
+	uint8_t yuv_matrix;       // MFVideoTransferMatrix value (1=BT709, 2=BT601)
+	uint8_t nominal_range;    // MFNominalRange value (0=0-255, 1=16-235)
+	uint8_t primaries;        // MFVideoPrimaries value
+	uint8_t transfer_function; // MFVideoTransFunc value
+}
+BuddyVideoConfig;
 
 typedef enum
 {
@@ -518,6 +528,10 @@ typedef struct
 	IMFTransform* Codec;
 	MFT_OUTPUT_STREAM_INFO EncodeConverterInfo;
 	MFT_OUTPUT_STREAM_INFO DecodeConverterInfo;
+
+	// video configuration
+	BuddyVideoConfig VideoConfig;       // Current video color space config
+	bool VideoConfigReceived;           // Has client received config from server?
 
 	// encoder stuff
 	IMFMediaEventGenerator* Generator;
@@ -1292,7 +1306,14 @@ static bool Buddy_CreateEncoder(ScreenBuddy* Buddy, int EncodeWidth, int EncodeH
 		ICodecAPI_Release(Codec);
 	}
 
-	IMFMediaType* InputType = Buddy_CreateVideoType(&MFVideoFormat_RGB32, EncodeWidth, EncodeHeight, BUDDY_ENCODE_FRAMERATE);
+	// Store video configuration for sending to client
+	Buddy->VideoConfig.yuv_matrix = MFVideoTransferMatrix_BT601;
+	Buddy->VideoConfig.nominal_range = MFNominalRange_16_235;
+	Buddy->VideoConfig.primaries = MFVideoPrimaries_BT709;
+	Buddy->VideoConfig.transfer_function = MFVideoTransFunc_709;
+
+	// Screen capture uses DXGI_FORMAT_B8G8R8A8_UNORM (BGRA) which maps to ARGB32 in Media Foundation
+	IMFMediaType* InputType = Buddy_CreateVideoType(&MFVideoFormat_ARGB32, EncodeWidth, EncodeHeight, BUDDY_ENCODE_FRAMERATE);
 	IMFMediaType* ConvertedType = Buddy_CreateVideoType(&MFVideoFormat_NV12, EncodeWidth, EncodeHeight, BUDDY_ENCODE_FRAMERATE);
 	if (!InputType || !ConvertedType)
 	{
@@ -1453,7 +1474,7 @@ static bool Buddy_CreateEncoder(ScreenBuddy* Buddy, int EncodeWidth, int EncodeH
 	return true;
 }
 
-static bool Buddy_ResetDecoder(IMFTransform* Decoder, IMFTransform* Converter)
+static bool Buddy_ResetDecoder(ScreenBuddy* Buddy, IMFTransform* Decoder, IMFTransform* Converter)
 {
 	DWORD DecodedIndex = 0;
 	IMFMediaType* DecodedType = NULL;
@@ -1475,10 +1496,16 @@ static bool Buddy_ResetDecoder(IMFTransform* Decoder, IMFTransform* Converter)
 
 	HR(IMFTransform_SetOutputType(Decoder, 0, DecodedType, 0));
 	HR(IMFTransform_SetInputType(Converter, 0, DecodedType, 0));
-	IMFMediaType_SetUINT32(DecodedType, &MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235);
-	IMFMediaType_SetUINT32(DecodedType, &MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT601);
-	IMFMediaType_SetUINT32(DecodedType, &MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709);
-	IMFMediaType_SetUINT32(DecodedType, &MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709);
+	
+	// Use negotiated video configuration from server (or defaults if not received yet)
+	IMFMediaType_SetUINT32(DecodedType, &MF_MT_VIDEO_NOMINAL_RANGE, 
+		Buddy->VideoConfigReceived ? Buddy->VideoConfig.nominal_range : MFNominalRange_16_235);
+	IMFMediaType_SetUINT32(DecodedType, &MF_MT_YUV_MATRIX, 
+		Buddy->VideoConfigReceived ? Buddy->VideoConfig.yuv_matrix : MFVideoTransferMatrix_BT601);
+	IMFMediaType_SetUINT32(DecodedType, &MF_MT_VIDEO_PRIMARIES, 
+		Buddy->VideoConfigReceived ? Buddy->VideoConfig.primaries : MFVideoPrimaries_BT709);
+	IMFMediaType_SetUINT32(DecodedType, &MF_MT_TRANSFER_FUNCTION, 
+		Buddy->VideoConfigReceived ? Buddy->VideoConfig.transfer_function : MFVideoTransFunc_709);
 
 	UINT64 FrameRate;
 	HR(IMFMediaType_GetUINT64(DecodedType, &MF_MT_FRAME_RATE, &FrameRate));
@@ -1573,7 +1600,7 @@ static bool Buddy_CreateDecoder(ScreenBuddy* Buddy)
 	HR(IMFTransform_SetInputType(Decoder, 0, InputType, 0));
 	IMFMediaType_Release(InputType);
 
-	if (!Buddy_ResetDecoder(Decoder, Converter))
+	if (!Buddy_ResetDecoder(Buddy, Decoder, Converter))
 	{
 		Assert(0);
 	}
@@ -1766,7 +1793,7 @@ static void Buddy_Decode(ScreenBuddy* Buddy, IMFMediaBuffer* InputBuffer)
 		HRESULT hr = IMFTransform_ProcessOutput(Buddy->Codec, 0, 1, &Output, &Status);
 		if (hr == MF_E_TRANSFORM_STREAM_CHANGE)
 		{
-			Buddy_ResetDecoder(Buddy->Codec, Buddy->Converter);
+			Buddy_ResetDecoder(Buddy, Buddy->Codec, Buddy->Converter);
 
 			if (Buddy->DecodeOutputSample)
 			{
@@ -3337,6 +3364,20 @@ static bool Buddy_StartSharing(ScreenBuddy* Buddy)
 			if (DerpNet_Open(&Buddy->Net, DerpHostName, &Buddy->MyPrivateKey))
 			{
 				LOG_NET("DerpNet_Open SUCCESS - Connection established!");
+				
+				// Send video configuration to client
+				uint8_t ConfigPacket[1 + sizeof(BuddyVideoConfig)];
+				ConfigPacket[0] = BUDDY_PACKET_VIDEO_CONFIG;
+				CopyMemory(&ConfigPacket[1], &Buddy->VideoConfig, sizeof(BuddyVideoConfig));
+				if (!Buddy_Send(Buddy, ConfigPacket, sizeof(ConfigPacket)))
+				{
+					LOG_ERROR("Failed to send video configuration packet");
+					return false;
+				}
+				LOG_INFO("Sent video configuration: YUV Matrix=%d, Range=%d, Primaries=%d, Transfer=%d",
+					Buddy->VideoConfig.yuv_matrix, Buddy->VideoConfig.nominal_range,
+					Buddy->VideoConfig.primaries, Buddy->VideoConfig.transfer_function);
+				
 				LOG_INFO("Waiting for remote viewer to connect...");
 				Buddy_StartWait(Buddy);
 				return true;
@@ -3580,6 +3621,28 @@ static void Buddy_NetworkEvent(ScreenBuddy* Buddy)
 				uint8_t Packet = RecvData[0];
 				RecvData += 1;
 				RecvSize -= 1;
+
+				if (Packet == BUDDY_PACKET_VIDEO_CONFIG)
+				{
+					// Receive video configuration from server
+					Assert(RecvSize >= sizeof(BuddyVideoConfig));
+					CopyMemory(&Buddy->VideoConfig, RecvData, sizeof(BuddyVideoConfig));
+					Buddy->VideoConfigReceived = true;
+					LOG_INFO("Received video configuration: YUV Matrix=%d, Range=%d, Primaries=%d, Transfer=%d",
+						Buddy->VideoConfig.yuv_matrix, Buddy->VideoConfig.nominal_range,
+						Buddy->VideoConfig.primaries, Buddy->VideoConfig.transfer_function);
+					
+					RecvData += sizeof(BuddyVideoConfig);
+					RecvSize -= sizeof(BuddyVideoConfig);
+					
+					// If there's more data in this packet, continue processing
+					if (RecvSize == 0) continue;
+					
+					// Get next packet type
+					Packet = RecvData[0];
+					RecvData += 1;
+					RecvSize -= 1;
+				}
 
 				if (Packet == BUDDY_PACKET_VIDEO)
 				{
