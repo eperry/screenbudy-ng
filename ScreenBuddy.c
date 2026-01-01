@@ -417,14 +417,14 @@ BUDDY_ID_LAN_CONNECT		= 237,
 	BUDDY_ID_WINDOW_CANCEL		= 340,
 
 	// dialog layout - Sci-Fi theme inspired by LCARS/B5
-	BUDDY_DIALOG_PADDING		= 6,   // Minimal padding for tight layout
-	BUDDY_DIALOG_ITEM_HEIGHT	= 22,  // Compact height
-	BUDDY_DIALOG_BUTTON_WIDTH	= 90,  // Tight LCARS-style buttons
-	BUDDY_DIALOG_BUTTON_SMALL	= 26,  // Compact icon buttons
-	BUDDY_DIALOG_KEY_WIDTH		= 340, // Code display width (wider to prevent cutoff)
-	BUDDY_DIALOG_WIDTH			= 480, // Width to accommodate code + icon buttons
-	BUDDY_DIALOG_ICON_SIZE		= 42,  // Compact icons
-	BUDDY_BANNER_HEIGHT			= 35,
+	BUDDY_DIALOG_PADDING		= 4,   // Ultra-minimal padding
+	BUDDY_DIALOG_ITEM_HEIGHT	= 16,  // Very tight spacing
+	BUDDY_DIALOG_BUTTON_WIDTH	= 45,  // 50% smaller buttons
+	BUDDY_DIALOG_BUTTON_SMALL	= 13,  // 50% smaller icon buttons
+	BUDDY_DIALOG_KEY_WIDTH		= 340, // Code display width
+	BUDDY_DIALOG_WIDTH			= 400, // Narrower for compact layout
+	BUDDY_DIALOG_ICON_SIZE		= 32,  // Smaller icons
+	BUDDY_BANNER_HEIGHT			= 25,
 
 	// network packets
 	BUDDY_PACKET_VIDEO			= 0,
@@ -4748,7 +4748,7 @@ static HWND Buddy_CreateDialog(ScreenBuddy* Buddy)
 	{
 		.Title = BUDDY_TITLE,
 		.Font = "Segoe UI",
-		.FontSize = 11,  // Larger for sci-fi aesthetic
+		.FontSize = 9,  // Compact font for tight layout
 		.Groups = (Buddy_DialogGroup[])
 		{
 			{
