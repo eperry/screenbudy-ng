@@ -1,6 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commctrl.h>
+#include <shlobj.h>
 #include <stdio.h>
 #include "settings_ui.h"
 #include "config.h"
@@ -31,6 +32,9 @@ void Log_WriteW(LogLevel level, const char* func, int line, const wchar_t* fmt, 
 #define IDOK_BUTTON             1009
 #define IDCANCEL_BUTTON         1010
 #define IDC_DERP_PORT_EDIT      1011
+#define IDC_LOG_DIR_EDIT        1012
+#define IDC_LOG_DIR_BROWSE      1013
+#define IDC_CONFIG_PATH_EDIT    1014
 
 // Dialog state - holds config pointer and tracks if user made changes
 typedef struct {
@@ -60,6 +64,15 @@ static void LoadControlsFromConfig(HWND hwnd, const BuddyConfig* cfg) {
     SetDlgItemTextW(hwnd, IDC_DERP_SERVER_EDIT, cfg->derp_server);
     SetDlgItemInt(hwnd, IDC_DERP_PORT_EDIT, cfg->derp_server_port, FALSE);
     SetDlgItemTextW(hwnd, IDC_RELEASE_KEY_EDIT, cfg->release_key);
+    
+    // File paths
+    SetDlgItemTextW(hwnd, IDC_LOG_DIR_EDIT, cfg->log_directory);
+    
+    // Show config file path (read-only)
+    SettingsState* state = (SettingsState*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    if (state) {
+        SetDlgItemTextW(hwnd, IDC_CONFIG_PATH_EDIT, state->config_path);
+    }
 }
 
 // Helper: Update config from control values
@@ -136,6 +149,18 @@ static BOOL SaveControlsToConfig(HWND hwnd, BuddyConfig* cfg) {
     lstrcpynW(cfg->release_key, releaseKey, 32);
     LOG_UI_INFO("Release key set to: '%ls'", cfg->release_key);
     
+    // Log directory
+    wchar_t logDir[MAX_PATH] = {0};
+    GetDlgItemTextW(hwnd, IDC_LOG_DIR_EDIT, logDir, MAX_PATH);
+    LOG_UI_INFO("Log directory read: '%ls'", logDir);
+    if (wcslen(logDir) == 0) {
+        LOG_UI_ERROR("Log directory validation FAILED: empty");
+        MessageBoxW(hwnd, L"Log directory cannot be empty.", L"Validation Error", MB_OK | MB_ICONERROR);
+        return FALSE;
+    }
+    lstrcpynW(cfg->log_directory, logDir, MAX_PATH);
+    LOG_UI_INFO("Log directory set to: '%ls'", cfg->log_directory);
+    
     LOG_UI_INFO("SaveControlsToConfig SUCCESS");
     return TRUE;
 }
@@ -194,11 +219,31 @@ INT_PTR CALLBACK SettingsUI_DlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                     return TRUE;
                 }
                 
+                case IDC_LOG_DIR_BROWSE: {
+                    // Browse for folder
+                    BROWSEINFOW bi = {0};
+                    bi.hwndOwner = hwnd;
+                    bi.lpszTitle = L"Select Log Directory";
+                    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+                    
+                    LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
+                    if (pidl) {
+                        wchar_t path[MAX_PATH];
+                        if (SHGetPathFromIDListW(pidl, path)) {
+                            SetDlgItemTextW(hwnd, IDC_LOG_DIR_EDIT, path);
+                            LOG_UI_INFO("Log directory selected: %ls", path);
+                        }
+                        CoTaskMemFree(pidl);
+                    }
+                    return TRUE;
+                }
+                
                 // Auto-save on field blur (lost focus)
                 case IDC_FRAMERATE_EDIT:
                 case IDC_BITRATE_EDIT:
                 case IDC_DERP_SERVER_EDIT:
                 case IDC_RELEASE_KEY_EDIT:
+                case IDC_LOG_DIR_EDIT:
                 case IDC_LOG_LEVEL_COMBO:
                 case IDC_BT709_CHECK:
                 case IDC_FULLRANGE_CHECK:

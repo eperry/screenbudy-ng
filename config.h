@@ -17,6 +17,7 @@ typedef struct {
     wchar_t derp_regions[16][256]; // DERP region server addresses
     char derp_private_key_hex[1024]; // Encrypted private key (hex string, needs space for encrypted blob)
     bool capture_full_screen; // Capture full screen or specific window
+    wchar_t log_directory[MAX_PATH]; // Directory for log files (default: app directory)
 } BuddyConfig;
 
 // Populate defaults (safe values)

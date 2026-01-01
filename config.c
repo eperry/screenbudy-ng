@@ -32,9 +32,11 @@ static void write_json(FILE* f, const BuddyConfig* cfg) {
     // Helper to convert wide string to UTF-8
     char utf8_derp_server[512] = {0};
     char utf8_release_key[64] = {0};
+    char utf8_log_directory[MAX_PATH * 3] = {0};
     char utf8_derp_regions[16][512] = {{0}};
     WideCharToMultiByte(CP_UTF8, 0, cfg->derp_server, -1, utf8_derp_server, sizeof(utf8_derp_server), NULL, NULL);
     WideCharToMultiByte(CP_UTF8, 0, cfg->release_key, -1, utf8_release_key, sizeof(utf8_release_key), NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, cfg->log_directory, -1, utf8_log_directory, sizeof(utf8_log_directory), NULL, NULL);
     for (int i = 0; i < 16; i++) {
         if (cfg->derp_regions[i][0] != 0) {
             WideCharToMultiByte(CP_UTF8, 0, cfg->derp_regions[i], -1, utf8_derp_regions[i], sizeof(utf8_derp_regions[i]), NULL, NULL);
@@ -52,6 +54,7 @@ static void write_json(FILE* f, const BuddyConfig* cfg) {
     fprintf(f, "  \"release_key\": \"%s\",\n", utf8_release_key);
     fprintf(f, "  \"derp_region\": %d,\n", cfg->derp_region);
     fprintf(f, "  \"capture_full_screen\": %s,\n", cfg->capture_full_screen ? "true" : "false");
+    fprintf(f, "  \"log_directory\": \"%s\",\n", utf8_log_directory);
     fprintf(f, "  \"derp_private_key_hex\": \"%s\",\n", cfg->derp_private_key_hex);
     fprintf(f, "  \"derp_regions\": [\n");
     bool first = true;
@@ -78,6 +81,13 @@ void BuddyConfig_Defaults(BuddyConfig* cfg) {
     lstrcpyW(cfg->release_key, L"Esc");
     cfg->derp_region = 0;
     cfg->capture_full_screen = true;
+    
+    // Default log directory: %AppData%\ScreenBuddy\Logs
+    PWSTR appdata = NULL;
+    if (SUCCEEDED(SHGetKnownFolderPath(&FOLDERID_RoamingAppData, 0, NULL, &appdata))) {
+        swprintf_s(cfg->log_directory, MAX_PATH, L"%ls\\ScreenBuddy\\Logs", appdata);
+        CoTaskMemFree(appdata);
+    }
     // derp_regions and derp_private_key_hex start empty
 }
 
@@ -276,6 +286,13 @@ bool BuddyConfig_Load(BuddyConfig* cfg, const wchar_t* path) {
         const JsonHSTRING* hs = (const JsonHSTRING*)s;
         lstrcpynW(cfg->release_key, hs->Ptr, 32);
         LOG_CONFIG_INFO("  release_key: %ls", cfg->release_key);
+    }
+
+    s = JsonObject_GetString(root, JsonCSTR("log_directory"));
+    if (s) {
+        const JsonHSTRING* hs = (const JsonHSTRING*)s;
+        lstrcpynW(cfg->log_directory, hs->Ptr, MAX_PATH);
+        LOG_CONFIG_INFO("  log_directory: %ls", cfg->log_directory);
     }
 
     // DERP region settings

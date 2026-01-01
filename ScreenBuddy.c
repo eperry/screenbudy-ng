@@ -417,11 +417,11 @@ BUDDY_ID_LAN_CONNECT		= 237,
 	BUDDY_ID_WINDOW_CANCEL		= 340,
 
 	// dialog layout
-	BUDDY_DIALOG_PADDING		= 8,  // Increased for modern spacing
-	BUDDY_DIALOG_ITEM_HEIGHT	= 18,  // Increased for better readability
-	BUDDY_DIALOG_BUTTON_WIDTH	= 80,  // Wider buttons for better touch targets
-	BUDDY_DIALOG_BUTTON_SMALL	= 20,
-	BUDDY_DIALOG_KEY_WIDTH		= 268,
+	BUDDY_DIALOG_PADDING		= 12,  // Modern Windows 11 spacing (increased from 8)
+	BUDDY_DIALOG_ITEM_HEIGHT	= 20,  // Increased for better touch targets (was 18)
+	BUDDY_DIALOG_BUTTON_WIDTH	= 90,  // Wider modern buttons (was 80)
+	BUDDY_DIALOG_BUTTON_SMALL	= 24,  // Slightly larger icon buttons (was 20)
+	BUDDY_DIALOG_KEY_WIDTH		= 260,  // Adjusted for new padding (was 268)
 	BUDDY_DIALOG_WIDTH			= 380,  // Wider for better layout
 	BUDDY_DIALOG_ICON_SIZE		= 48,  // Larger icons for modern look
 	BUDDY_BANNER_HEIGHT			= 40,
@@ -4047,6 +4047,14 @@ static INT_PTR CALLBACK Buddy_DialogProc(HWND Dialog, UINT Message, WPARAM WPara
 		{
 			return (INT_PTR)GetSysColorBrush(COLOR_WINDOW);
 		}
+		// Modern styling for status labels
+		if (GetDlgCtrlID((HWND)LParam) == BUDDY_ID_SHARE_STATUS)
+		{
+			HDC hdc = (HDC)WParam;
+			SetTextColor(hdc, RGB(0, 120, 212));  // Windows 11 accent blue
+			SetBkMode(hdc, TRANSPARENT);
+			return (INT_PTR)GetSysColorBrush(COLOR_BTNFACE);
+		}
 		break;
 
 	case WM_DROPFILES:
@@ -4616,7 +4624,7 @@ static HWND Buddy_CreateDialog(ScreenBuddy* Buddy)
 	{
 		.Title = BUDDY_TITLE,
 		.Font = "Segoe UI",
-		.FontSize = 9,
+		.FontSize = 10,  // Slightly larger for better readability
 		.Groups = (Buddy_DialogGroup[])
 		{
 			{

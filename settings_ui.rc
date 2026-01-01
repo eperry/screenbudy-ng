@@ -14,9 +14,13 @@
 #define IDC_RELEASE_KEY_EDIT    1008
 #define IDOK_BUTTON             1009
 #define IDCANCEL_BUTTON         1010
+#define IDC_DERP_PORT_EDIT      1011
+#define IDC_LOG_DIR_EDIT        1012
+#define IDC_LOG_DIR_BROWSE      1013
+#define IDC_CONFIG_PATH_EDIT    1014
 
 // Settings Dialog - Clean, simple layout
-IDD_SETTINGS DIALOGEX 0, 0, 300, 270
+IDD_SETTINGS DIALOGEX 0, 0, 300, 320
 STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "ScreenBuddy Settings"
 FONT 9, "Segoe UI", 400, 0, 0x0
@@ -41,8 +45,6 @@ BEGIN
     LTEXT           "DERP Server:", IDC_STATIC, 20, 95, 60, 10
     EDITTEXT        IDC_DERP_SERVER_EDIT, 85, 93, 120, 14, ES_AUTOHSCROLL
     LTEXT           "Port:", IDC_STATIC, 210, 95, 25, 10
-// Add missing control ID for DERP port edit
-#define IDC_DERP_PORT_EDIT      1011
     EDITTEXT        IDC_DERP_PORT_EDIT, 235, 93, 45, 14, ES_NUMBER | ES_AUTOHSCROLL
     
     LTEXT           "Log Level:", IDC_STATIC, 20, 115, 60, 10
@@ -55,7 +57,17 @@ BEGIN
     LTEXT           "Release Key:", IDC_STATIC, 140, 155, 50, 10
     EDITTEXT        IDC_RELEASE_KEY_EDIT, 195, 153, 80, 14, ES_AUTOHSCROLL
     
+    // File Locations
+    GROUPBOX        "File Locations", IDC_STATIC, 10, 185, 280, 70
+    
+    LTEXT           "Config File:", IDC_STATIC, 20, 205, 60, 10
+    EDITTEXT        IDC_CONFIG_PATH_EDIT, 85, 203, 195, 14, ES_AUTOHSCROLL | ES_READONLY | WS_DISABLED
+    
+    LTEXT           "Log Directory:", IDC_STATIC, 20, 230, 60, 10
+    EDITTEXT        IDC_LOG_DIR_EDIT, 85, 228, 150, 14, ES_AUTOHSCROLL
+    PUSHBUTTON      "Browse...", IDC_LOG_DIR_BROWSE, 240, 227, 40, 14
+    
     // Buttons
-    DEFPUSHBUTTON   "OK", IDOK_BUTTON, 140, 250, 70, 14
-    PUSHBUTTON      "Cancel", IDCANCEL_BUTTON, 220, 250, 70, 14
+    DEFPUSHBUTTON   "OK", IDOK_BUTTON, 140, 300, 70, 14
+    PUSHBUTTON      "Cancel", IDCANCEL_BUTTON, 220, 300, 70, 14
 END
