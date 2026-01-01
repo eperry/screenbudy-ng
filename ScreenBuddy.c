@@ -4688,7 +4688,7 @@ static void Buddy_DoDialogLayout(const Buddy_DialogLayout* Dialog, void* Buffer,
 
 		int X = GroupX;
 		int Y = GroupY;
-		int W = BUDDY_DIALOG_WIDTH;
+		int W = BUDDY_DIALOG_WIDTH - (2 * BUDDY_DIALOG_PADDING);  // Account for padding on both sides
 		int H = BUDDY_DIALOG_ITEM_HEIGHT * (1 + LineCount) + BUDDY_DIALOG_PADDING;
 
 		Data = Dialog__DoItem(Data, Group->Caption, -1, BUDDY_DIALOG_BUTTON, BS_GROUPBOX, X, Y, W, H);
