@@ -18,9 +18,10 @@
 #define IDC_LOG_DIR_EDIT        1012
 #define IDC_LOG_DIR_BROWSE      1013
 #define IDC_CONFIG_PATH_EDIT    1014
+#define IDC_LOG_FORMAT_EDIT     1015
 
 // Settings Dialog - Clean, simple layout
-IDD_SETTINGS DIALOGEX 0, 0, 300, 320
+IDD_SETTINGS DIALOGEX 0, 0, 300, 350
 STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "ScreenBuddy Settings"
 FONT 9, "Segoe UI", 400, 0, 0x0
@@ -58,7 +59,7 @@ BEGIN
     EDITTEXT        IDC_RELEASE_KEY_EDIT, 195, 153, 80, 14, ES_AUTOHSCROLL
     
     // File Locations
-    GROUPBOX        "File Locations", IDC_STATIC, 10, 185, 280, 70
+    GROUPBOX        "File Locations", IDC_STATIC, 10, 185, 280, 100
     
     LTEXT           "Config File:", IDC_STATIC, 20, 205, 60, 10
     EDITTEXT        IDC_CONFIG_PATH_EDIT, 85, 203, 195, 14, ES_AUTOHSCROLL | ES_READONLY | WS_DISABLED
@@ -67,7 +68,11 @@ BEGIN
     EDITTEXT        IDC_LOG_DIR_EDIT, 85, 228, 150, 14, ES_AUTOHSCROLL
     PUSHBUTTON      "Browse...", IDC_LOG_DIR_BROWSE, 240, 227, 40, 14
     
+    LTEXT           "Log Filename:", IDC_STATIC, 20, 255, 60, 10
+    EDITTEXT        IDC_LOG_FORMAT_EDIT, 85, 253, 195, 14, ES_AUTOHSCROLL
+    LTEXT           "Tokens: {date} {time} {pid} {appname}", IDC_STATIC, 85, 270, 195, 10
+    
     // Buttons
-    DEFPUSHBUTTON   "OK", IDOK_BUTTON, 140, 300, 70, 14
-    PUSHBUTTON      "Cancel", IDCANCEL_BUTTON, 220, 300, 70, 14
+    DEFPUSHBUTTON   "OK", IDOK_BUTTON, 140, 330, 70, 14
+    PUSHBUTTON      "Cancel", IDCANCEL_BUTTON, 220, 330, 70, 14
 END

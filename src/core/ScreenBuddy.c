@@ -60,6 +60,7 @@
 #include <shellapi.h>
 #include <commdlg.h>
 #include <shlwapi.h>
+#include <shlobj.h>
 
 #include "ScreenBuddyVS.h"
 #include "ScreenBuddyPS.h"
@@ -67,6 +68,19 @@
 #include "settings_ui.h"
 // #include "lan_discovery.h" (LAN discovery removed)
 #include "direct_connection.h"
+
+// ==================== DEBUG RENDERING TOGGLE ====================
+// Set to 1 for extensive render pipeline logging, 0 for production
+#define DEBUG_RENDER 0
+
+#if DEBUG_RENDER
+	#define LOG_RENDER(...) LOG_INFO(__VA_ARGS__)
+	#define LOG_RENDER_ERROR(...) LOG_ERROR(__VA_ARGS__)
+#else
+	#define LOG_RENDER(...) do {} while(0)
+	#define LOG_RENDER_ERROR(...) do {} while(0)
+#endif
+// ===============================================================
 
 // Menu resource IDs (must match ScreenBuddy.rc)
 #define IDM_FILE_EXIT    100
@@ -126,71 +140,98 @@ static const char* LogLevelStr(LogLevel level) {
 	}
 }
 
-static void Log_Init(void) {
-	InitializeCriticalSection(&g_LogLock);
+static void Log_Init(const wchar_t* logDir, const wchar_t* logFilenameFormat) {
+	static bool s_CritSecInitialized = false;
 	
-	// Get module path
-	wchar_t ModulePath[MAX_PATH];
-	DWORD pathLen = GetModuleFileNameW(NULL, ModulePath, MAX_PATH);
-	if (pathLen == 0) {
-		MessageBoxW(NULL, L"GetModuleFileNameW failed!", L"Log Init Error", MB_OK | MB_ICONERROR);
-		return;
+	// Close existing log if re-initializing
+	if (g_LogFile) {
+		EnterCriticalSection(&g_LogLock);
+		fclose(g_LogFile);
+		g_LogFile = NULL;
+		LeaveCriticalSection(&g_LogLock);
 	}
 	
-	// Remove filename to get directory
-	wchar_t* LastSlash = wcsrchr(ModulePath, L'\\');
-	if (LastSlash) *LastSlash = L'\0';
+	// Initialize critical section only once
+	if (!s_CritSecInitialized) {
+		InitializeCriticalSection(&g_LogLock);
+		s_CritSecInitialized = true;
+	}
 	
-	// Create timestamp for filename using SYSTEMTIME (more reliable)
+	// Get default directory if not specified
+	wchar_t DefaultLogDir[MAX_PATH];
+	if (!logDir || logDir[0] == L'\0') {
+		// Use module directory by default
+		DWORD pathLen = GetModuleFileNameW(NULL, DefaultLogDir, MAX_PATH);
+		if (pathLen > 0) {
+			wchar_t* LastSlash = wcsrchr(DefaultLogDir, L'\\');
+			if (LastSlash) *LastSlash = L'\0';
+		}
+		logDir = DefaultLogDir;
+	}
+	
+	// Create log directory if it doesn't exist
+	SHCreateDirectoryExW(NULL, logDir, NULL);
+	
+	// Get default filename format if not specified
+	const wchar_t* DefaultFormat = L"{appname}-{date}_{time}.log";
+	if (!logFilenameFormat || logFilenameFormat[0] == L'\0') {
+		logFilenameFormat = DefaultFormat;
+	}
+	
+	// Create timestamp
 	SYSTEMTIME st;
 	GetLocalTime(&st);
 	
-	wchar_t LogFilePathW[MAX_PATH];
+	// Prepare token replacements
+	wchar_t DateStr[32], TimeStr[32], PidStr[32], AppName[64];
+	swprintf_s(DateStr, 32, L"%04d%02d%02d", st.wYear, st.wMonth, st.wDay);
+	swprintf_s(TimeStr, 32, L"%02d%02d%02d", st.wHour, st.wMinute, st.wSecond);
+	swprintf_s(PidStr, 32, L"%lu", GetCurrentProcessId());
+	lstrcpyW(AppName, L"screenbuddy");
 	
-	// Build path manually without swprintf
+	// Build filename with token replacement
+	wchar_t Filename[MAX_PATH];
 	int pos = 0;
-	
-	// Copy module path
-	for (int i = 0; ModulePath[i] && pos < MAX_PATH - 1; i++) {
-		LogFilePathW[pos++] = ModulePath[i];
+	for (int i = 0; logFilenameFormat[i] && pos < MAX_PATH - 1; i++) {
+		if (logFilenameFormat[i] == L'{') {
+			// Find end of token
+			int tokenStart = i + 1;
+			int tokenEnd = tokenStart;
+			while (logFilenameFormat[tokenEnd] && logFilenameFormat[tokenEnd] != L'}') {
+				tokenEnd++;
+			}
+			if (logFilenameFormat[tokenEnd] == L'}') {
+				// Extract token
+				int tokenLen = tokenEnd - tokenStart;
+				if (tokenLen > 0 && tokenLen < 64) {
+					wchar_t Token[64];
+					wcsncpy_s(Token, 64, &logFilenameFormat[tokenStart], tokenLen);
+					Token[tokenLen] = L'\0';
+					
+					// Replace token
+					const wchar_t* replacement = NULL;
+					if (wcscmp(Token, L"date") == 0) replacement = DateStr;
+					else if (wcscmp(Token, L"time") == 0) replacement = TimeStr;
+					else if (wcscmp(Token, L"pid") == 0) replacement = PidStr;
+					else if (wcscmp(Token, L"appname") == 0) replacement = AppName;
+					
+					if (replacement) {
+						for (int j = 0; replacement[j] && pos < MAX_PATH - 1; j++) {
+							Filename[pos++] = replacement[j];
+						}
+						i = tokenEnd;
+						continue;
+					}
+				}
+			}
+		}
+		Filename[pos++] = logFilenameFormat[i];
 	}
+	Filename[pos] = L'\0';
 	
-	// Add separator and prefix
-	const wchar_t* prefix = L"\\screenbuddy-";
-	for (int i = 0; prefix[i] && pos < MAX_PATH - 1; i++) {
-		LogFilePathW[pos++] = prefix[i];
-	}
-	
-	// Add timestamp digits manually: YYYYMMDD_HHMMSS
-	// Year
-	LogFilePathW[pos++] = L'0' + (st.wYear / 1000);
-	LogFilePathW[pos++] = L'0' + ((st.wYear / 100) % 10);
-	LogFilePathW[pos++] = L'0' + ((st.wYear / 10) % 10);
-	LogFilePathW[pos++] = L'0' + (st.wYear % 10);
-	// Month
-	LogFilePathW[pos++] = L'0' + (st.wMonth / 10);
-	LogFilePathW[pos++] = L'0' + (st.wMonth % 10);
-	// Day
-	LogFilePathW[pos++] = L'0' + (st.wDay / 10);
-	LogFilePathW[pos++] = L'0' + (st.wDay % 10);
-	// Separator
-	LogFilePathW[pos++] = L'_';
-	// Hour
-	LogFilePathW[pos++] = L'0' + (st.wHour / 10);
-	LogFilePathW[pos++] = L'0' + (st.wHour % 10);
-	// Minute
-	LogFilePathW[pos++] = L'0' + (st.wMinute / 10);
-	LogFilePathW[pos++] = L'0' + (st.wMinute % 10);
-	// Second
-	LogFilePathW[pos++] = L'0' + (st.wSecond / 10);
-	LogFilePathW[pos++] = L'0' + (st.wSecond % 10);
-	
-	// Add .log extension
-	const wchar_t* ext = L".log";
-	for (int i = 0; ext[i] && pos < MAX_PATH - 1; i++) {
-		LogFilePathW[pos++] = ext[i];
-	}
-	LogFilePathW[pos] = L'\0';
+	// Build full path
+	wchar_t LogFilePathW[MAX_PATH];
+	swprintf_s(LogFilePathW, MAX_PATH, L"%ls\\%ls", logDir, Filename);
 	
 	// Convert to narrow string for display
 	WideCharToMultiByte(CP_UTF8, 0, LogFilePathW, -1, g_LogFilePath, MAX_PATH, NULL, NULL);
@@ -512,11 +553,13 @@ typedef struct
 	ID3D11Device* Device;
 	ID3D11DeviceContext* Context;
 	IDXGISwapChain1* SwapChain;
+	ID3D11Texture2D* InputTexture;		// Actual ARGB32 texture for rendering
 	ID3D11ShaderResourceView* InputView;
 	ID3D11RenderTargetView* OutputView;
 	ID3D11VertexShader* VertexShader;
 	ID3D11PixelShader* PixelShader;
 	ID3D11Buffer* ConstantBuffer;
+	ID3D11SamplerState* SamplerState;
 	bool InputMipsGenerated;
 	int InputWidth;
 	int InputHeight;
@@ -524,10 +567,9 @@ typedef struct
 	int OutputHeight;
 
 	// media stuff
-	IMFTransform* Converter;
+	// Direct color conversion - no Video Processor MFT Converters needed
 	IMFTransform* Codec;
-	MFT_OUTPUT_STREAM_INFO EncodeConverterInfo;
-	MFT_OUTPUT_STREAM_INFO DecodeConverterInfo;
+	// Direct color conversion - no converter stream info needed
 
 	// video configuration
 	BuddyVideoConfig VideoConfig;       // Current video color space config
@@ -582,62 +624,109 @@ static IMFMediaType* Buddy_CreateVideoType(const GUID* Subtype, UINT Width, UINT
 	return Type;
 }
 
-static bool Buddy_GetConverterOutput(IMFTransform* Transform, IMFVideoSampleAllocatorEx* Allocator, MFT_OUTPUT_STREAM_INFO* Info, DWORD SampleSize, const char* Label, MFT_OUTPUT_DATA_BUFFER* Output)
+// Direct color conversion - Buddy_GetConverterOutput function removed
+
+// Debug: Save ARGB frame as BMP file
+
+
+static void ConvertARGB32ToNV12(const uint8_t* argbData, uint8_t* nv12Data, int width, int height, int stride)
+
 {
-	(void)SampleSize;
-	for (int Attempt = 0; Attempt < 4; ++Attempt)
-	{
-		if (!Output->pSample && !(Info->dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES))
-		{
-			if (!Allocator)
-			{
-				LOG_ERROR("%s: no sample and converter does not provide samples", Label);
-				return false;
-			}
-			HRESULT hrAlloc = IMFVideoSampleAllocatorEx_AllocateSample(Allocator, &Output->pSample);
-			if (FAILED(hrAlloc))
-			{
-				LOG_ERROR("%s: AllocateSample failed: 0x%08X", Label, hrAlloc);
-				return false;
-			}
-		}
+    // Direct sRGB to YUV conversion for screen capture
+    // YUV uses limited range (16-235) for compatibility with H.264
+    
+    uint8_t* yPlane = nv12Data;
+    uint8_t* uvPlane = nv12Data + (width * height);
+    
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            int offset = y * stride + x * 4;  // Use stride instead of width
+            uint8_t b = argbData[offset + 0];
+            uint8_t g = argbData[offset + 1]; 
+            uint8_t r = argbData[offset + 2];
+            // uint8_t a = argbData[offset + 3]; // ignore alpha
+            
+            // Convert sRGB to YUV using BT.709 matrix
+            // Y: 0-255, U/V: -128 to +127
+            float y_val = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+            float u_val = -0.1146f * r - 0.3854f * g + 0.5f * b;
+            float v_val = 0.5f * r - 0.4542f * g - 0.0458f * b;
+            
+            // Scale to limited range (16-235 for Y, 16-240 for UV)
+            y_val = y_val * 219.0f / 255.0f + 16.0f;
+            u_val = u_val * 224.0f / 255.0f + 128.0f;
+            v_val = v_val * 224.0f / 255.0f + 128.0f;
+            
+            // Clamp to valid ranges
+            y_val = (y_val < 16.0f) ? 16.0f : ((y_val > 235.0f) ? 235.0f : y_val);
+            u_val = (u_val < 16.0f) ? 16.0f : ((u_val > 240.0f) ? 240.0f : u_val);
+            v_val = (v_val < 16.0f) ? 16.0f : ((v_val > 240.0f) ? 240.0f : v_val);
+            
+            yPlane[y * width + x] = (uint8_t)y_val;
+            
+            // UV subsampling (4:2:0)
+            if (x % 2 == 0 && y % 2 == 0) {
+                int uvOffset = (y / 2) * (width / 2) + (x / 2);
+                uvPlane[uvOffset * 2 + 0] = (uint8_t)u_val;     // U
+                uvPlane[uvOffset * 2 + 1] = (uint8_t)v_val;     // V
+            }
+        }
+    }
+}
 
-		DWORD Status = 0;
-		HRESULT hr = IMFTransform_ProcessOutput(Transform, 0, 1, Output, &Status);
-		if (FAILED(hr))
-		{
-			LOG_ERROR("%s ProcessOutput failed: 0x%08X (status=0x%08X)", Label, hr, Status);
-			return false;
-		}
-		if (Status != 0)
-		{
-			LOG_DEBUG("%s ProcessOutput status: 0x%08X", Label, Status);
-		}
+static void ConvertNV12ToARGB32(const uint8_t* nv12Data, uint8_t* argbData, int width, int height)
+{
+    LOG_INFO("ConvertNV12ToARGB32: Converting %dx%d frame", width, height);
 
-		if (!Output->pSample)
-		{
-			LOG_ERROR("%s returned NULL sample", Label);
-			return false;
-		}
+    if (!nv12Data || !argbData) {
+        LOG_ERROR("ConvertNV12ToARGB32: NULL buffer pointers!");
+        return;
+    }
 
-		DWORD BufferCount = 0;
-		HRESULT hrCount = IMFSample_GetBufferCount(Output->pSample, &BufferCount);
-		if (SUCCEEDED(hrCount) && BufferCount > 0)
-		{
-			return true;
-		}
+    if (width <= 0 || height <= 0 || width > 4096 || height > 4096) {
+        LOG_ERROR("ConvertNV12ToARGB32: Invalid dimensions %dx%d", width, height);
+        return;
+    }
 
-		LOG_DEBUG("%s sample empty; retrying...", Label);
-		if (Output->pSample)
-		{
-			IMFSample_Release(Output->pSample);
-			Output->pSample = NULL;
-		}
+    // Direct YUV to sRGB conversion
+    const uint8_t* yPlane = nv12Data;
+    const uint8_t* uvPlane = nv12Data + (width * height);
 
-		// If converter provides samples, let it on next loop; if caller allocates, loop will re-allocate above
-	}
+    LOG_INFO("ConvertNV12ToARGB32: Y plane at %p, UV plane at %p, ARGB at %p", yPlane, uvPlane, argbData);
 
-	return false;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            int y_val = yPlane[y * width + x];
+
+            // Get UV values (4:2:0 subsampling)
+            int uvOffset = (y / 2) * (width / 2) + (x / 2);
+            int u_val = uvPlane[uvOffset * 2 + 0];
+            int v_val = uvPlane[uvOffset * 2 + 1];
+
+            // Convert from limited range to full range
+            float y_norm = (y_val - 16.0f) * 255.0f / 219.0f;
+            float u_norm = (u_val - 128.0f) * 255.0f / 224.0f;
+            float v_norm = (v_val - 128.0f) * 255.0f / 224.0f;
+
+            // Convert YUV to RGB using BT.709 matrix
+            float r = y_norm + 1.5748f * v_norm;
+            float g = y_norm - 0.1873f * u_norm - 0.4681f * v_norm;
+            float b = y_norm + 1.8556f * u_norm;
+
+            // Clamp to 0-255
+            r = (r < 0.0f) ? 0.0f : ((r > 255.0f) ? 255.0f : r);
+            g = (g < 0.0f) ? 0.0f : ((g > 255.0f) ? 255.0f : g);
+            b = (b < 0.0f) ? 0.0f : ((b > 255.0f) ? 255.0f : b);
+
+            int offset = (y * width + x) * 4;
+            argbData[offset + 0] = (uint8_t)b;  // B
+            argbData[offset + 1] = (uint8_t)g;  // G
+            argbData[offset + 2] = (uint8_t)r;  // R
+            argbData[offset + 3] = 255;         // A
+        }
+    }
+
+    LOG_INFO("ConvertNV12ToARGB32: Conversion completed successfully");
 }
 
 typedef struct
@@ -908,6 +997,9 @@ static bool DerpHealthCheck(const BuddyConfig* cfg, char* logbuf, size_t logbufl
 
 static void Buddy_LoadConfig(ScreenBuddy* Buddy)
 {
+	// Initialize with defaults first so all fields have valid values
+	BuddyConfig_Defaults(&Buddy->Config);
+	
 	// Load JSON config
 	wchar_t cfgPath[MAX_PATH];
 	if (BuddyConfig_GetDefaultPath(cfgPath, MAX_PATH))
@@ -915,8 +1007,7 @@ static void Buddy_LoadConfig(ScreenBuddy* Buddy)
 		FILE* f = NULL;
 		_wfopen_s(&f, cfgPath, L"r");
 		if (!f) {
-			// File missing: create new valid config
-			BuddyConfig_Defaults(&Buddy->Config);
+			// File missing: save defaults to create the file
 			BuddyConfig_Save(&Buddy->Config, cfgPath);
 			LOG_INFO("Created new default config at %ls", cfgPath);
 		} else {
@@ -932,7 +1023,6 @@ static void Buddy_LoadConfig(ScreenBuddy* Buddy)
 			}
 		}
 	} else {
-		BuddyConfig_Defaults(&Buddy->Config);
 		LOG_WARN("Could not get config path; using defaults");
 	}
 
@@ -1237,20 +1327,7 @@ static bool Buddy_CreateEncoder(ScreenBuddy* Buddy, int EncodeWidth, int EncodeH
 	}
 	CoTaskMemFree(Activate);
 
-	IMFTransform* Converter;
-	HR(CoCreateInstance(&CLSID_VideoProcessorMFT, NULL, CLSCTX_INPROC_SERVER, &IID_IMFTransform, (void**)&Converter));
-
-	// Check if sample allocator is likely to work by querying the device capabilities
-	// This will be set later based on sample allocator initialization success
-	BOOL useCallerAllocatedSamples = TRUE;  // Will be updated after sample allocator init
-	
-	{
-		IMFAttributes* Attributes;
-		HR(IMFTransform_GetAttributes(Converter, &Attributes));
-		HR(IMFAttributes_SetUINT32(Attributes, &MF_XVP_PLAYBACK_MODE, TRUE));
-		// Don't set MF_XVP_CALLER_ALLOCATES_OUTPUT yet - will do after sample allocator test
-		IMFAttributes_Release(Attributes);
-	}
+	// Direct color conversion - no Video Processor MFT Converter needed
 
 	// unlock async encoder (only for hardware async encoders)
 	if (IsAsyncEncoder)
@@ -1275,7 +1352,7 @@ static bool Buddy_CreateEncoder(ScreenBuddy* Buddy, int EncodeWidth, int EncodeH
 		HR(MFCreateDXGIDeviceManager(&Token, &Manager));
 		HR(IMFDXGIDeviceManager_ResetDevice(Manager, (IUnknown*)Buddy->Device, Token));
 		HR(IMFTransform_ProcessMessage(Encoder, MFT_MESSAGE_SET_D3D_MANAGER, (ULONG_PTR)Manager));
-		HR(IMFTransform_ProcessMessage(Converter, MFT_MESSAGE_SET_D3D_MANAGER, (ULONG_PTR)Manager));
+		// Direct color conversion - no Converter to set D3D manager on
 	}
 
 	// enable low latency for encoder, no B-frames, max GOP size
@@ -1320,7 +1397,7 @@ static bool Buddy_CreateEncoder(ScreenBuddy* Buddy, int EncodeWidth, int EncodeH
 		LOG_ERROR("Failed to create media types for encoder");
 		if (InputType) IMFMediaType_Release(InputType);
 		if (ConvertedType) IMFMediaType_Release(ConvertedType);
-		IMFTransform_Release(Converter);
+		// Direct color conversion - no Converter to release
 		IMFTransform_Release(Encoder);
 		IMFDXGIDeviceManager_Release(Manager);
 		return false;
@@ -1338,7 +1415,7 @@ static bool Buddy_CreateEncoder(ScreenBuddy* Buddy, int EncodeWidth, int EncodeH
 	HR(IMFMediaType_SetUINT64(OutputType, &MF_MT_PIXEL_ASPECT_RATIO, MF64(1, 1)));
 
 	// Converter output type will be set AFTER sample allocator init determines MF_XVP_CALLER_ALLOCATES_OUTPUT
-	HR(IMFTransform_SetInputType(Converter, 0, InputType, 0));
+	// Direct color conversion - no Converter input type to set
 
 	HRESULT hrSetTypes = IMFTransform_SetOutputType(Encoder, 0, OutputType, 0);
 	if (FAILED(hrSetTypes))
@@ -1346,7 +1423,7 @@ static bool Buddy_CreateEncoder(ScreenBuddy* Buddy, int EncodeWidth, int EncodeH
 		IMFMediaType_Release(InputType);
 		IMFMediaType_Release(ConvertedType);
 		IMFMediaType_Release(OutputType);
-		IMFTransform_Release(Converter);
+		// Direct color conversion - no Converter to release
 		IMFTransform_Release(Encoder);
 		IMFDXGIDeviceManager_Release(Manager);
 		MessageBoxW(Buddy->DialogWindow, L"Cannot configure video encoder!\n\nThe selected resolution or format may not be supported.", L"Error", MB_ICONERROR);
@@ -1364,80 +1441,42 @@ static bool Buddy_CreateEncoder(ScreenBuddy* Buddy, int EncodeWidth, int EncodeH
 	};
 	Buddy->EventCallback.lpVtbl = &Buddy__IMFAsyncCallbackVtbl;
 
-	// Try to initialize sample allocator FIRST
+	// Try to initialize sample allocator for encoder
 	IMFVideoSampleAllocatorEx* SampleAllocator;
 	HR(MFCreateVideoSampleAllocatorEx(&IID_IMFVideoSampleAllocatorEx, (void**)&SampleAllocator));
 	HR(IMFVideoSampleAllocatorEx_SetDirectXManager(SampleAllocator, (IUnknown*)Manager));
 	
 	{
-		// Log media type info for debugging
-		UINT64 frameSize = 0;
-		IMFMediaType_GetUINT64(ConvertedType, &MF_MT_FRAME_SIZE, &frameSize);
-		LOG_DEBUG("Sample allocator media type: frameSize=0x%llX (%dx%d)", frameSize, (int)(frameSize >> 32), (int)(frameSize & 0xFFFFFFFF));
-		
-		// Initialize sample allocator - try with bind flags first
+		// Initialize sample allocator for encoder input (NV12)
 		IMFAttributes* Attributes;
 		HR(MFCreateAttributes(&Attributes, 2));
 		HR(IMFAttributes_SetUINT32(Attributes, &MF_SA_D3D11_BINDFLAGS, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE));
 		HR(IMFAttributes_SetUINT32(Attributes, &MF_SA_D3D11_USAGE, D3D11_USAGE_DEFAULT));
 		
-		LOG_DEBUG("Initializing sample allocator: reserve=0, max=%d", BUDDY_ENCODE_QUEUE_SIZE);
+		LOG_DEBUG("Initializing sample allocator for encoder: reserve=0, max=%d", BUDDY_ENCODE_QUEUE_SIZE);
 		HRESULT hrInit = IMFVideoSampleAllocatorEx_InitializeSampleAllocatorEx(SampleAllocator, 0, BUDDY_ENCODE_QUEUE_SIZE, Attributes, ConvertedType);
 		IMFAttributes_Release(Attributes);
 		
-		// Set MF_XVP_CALLER_ALLOCATES_OUTPUT based on whether sample allocator succeeded
 		if (FAILED(hrInit))
 		{
-			LOG_DEBUG("Sample allocator init failed (0x%08X) - letting converter provide samples", hrInit);
-			useCallerAllocatedSamples = FALSE;
-			// Release the failed allocator
+			LOG_ERROR("Sample allocator initialization failed (0x%08X)", hrInit);
 			IMFVideoSampleAllocatorEx_Release(SampleAllocator);
 			SampleAllocator = NULL;
 		}
 		else
 		{
-			LOG_DEBUG("Sample allocator initialized successfully - caller will provide samples");
-			useCallerAllocatedSamples = TRUE;
+			LOG_DEBUG("Sample allocator initialized successfully");
 		}
 	}
 	
-	// NOW configure the converter output - set MF_XVP_CALLER_ALLOCATES_OUTPUT BEFORE setting output type
-	{
-		IMFAttributes* ConverterAttrs;
-		HR(IMFTransform_GetAttributes(Converter, &ConverterAttrs));
-		HR(IMFAttributes_SetUINT32(ConverterAttrs, &MF_XVP_CALLER_ALLOCATES_OUTPUT, useCallerAllocatedSamples));
-		IMFAttributes_Release(ConverterAttrs);
-		LOG_DEBUG("MF_XVP_CALLER_ALLOCATES_OUTPUT set to %s", useCallerAllocatedSamples ? "TRUE" : "FALSE");
-	}
-	
-	// Set converter output type AFTER MF_XVP_CALLER_ALLOCATES_OUTPUT is configured
-	HR(IMFTransform_SetOutputType(Converter, 0, ConvertedType, 0));
-	
-	// Check output stream info - validation only
-	MFT_OUTPUT_STREAM_INFO OutputInfo;
-	HR(IMFTransform_GetOutputStreamInfo(Converter, 0, &OutputInfo));
-	Buddy->EncodeConverterInfo = OutputInfo;
-	LOG_DEBUG("Converter OutputStreamInfo flags: 0x%08X (PROVIDES_SAMPLES=%s)", 
-		OutputInfo.dwFlags,
-		(OutputInfo.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) ? "yes" : "no");
-	
-	// The flag should match our useCallerAllocatedSamples setting
-	// If useCallerAllocatedSamples is FALSE, converter should provide samples
-	// If useCallerAllocatedSamples is TRUE, converter should NOT provide samples
-	if (!useCallerAllocatedSamples)
-	{
-		// We want the converter to provide samples
-		if (!(OutputInfo.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES))
-		{
-			LOG_DEBUG("WARNING: Converter not providing samples despite MF_XVP_CALLER_ALLOCATES_OUTPUT=FALSE");
-		}
-	}
+	// Direct color conversion - no Converter configuration needed
 
+	MFT_OUTPUT_STREAM_INFO OutputInfo;
 	HR(IMFTransform_GetOutputStreamInfo(Encoder, 0, &OutputInfo));
 	Assert(OutputInfo.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES);
 
 	// NOW start streaming after everything is configured
-	HR(IMFTransform_ProcessMessage(Converter, MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0));
+	// Direct color conversion - no Converter to start
 	HR(IMFTransform_ProcessMessage(Encoder, MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0));
 
 	IMFMediaType_Release(InputType);
@@ -1457,7 +1496,7 @@ static bool Buddy_CreateEncoder(ScreenBuddy* Buddy, int EncodeWidth, int EncodeH
 	Buddy->EncodeWidth = EncodeWidth;
 	Buddy->EncodeHeight = EncodeHeight;
 	Buddy->Codec = Encoder;
-	Buddy->Converter = Converter;
+	// Direct color conversion - no Converter needed
 	
 	// Only get event generator for async encoders
 	if (IsAsyncEncoder)
@@ -1474,7 +1513,7 @@ static bool Buddy_CreateEncoder(ScreenBuddy* Buddy, int EncodeWidth, int EncodeH
 	return true;
 }
 
-static bool Buddy_ResetDecoder(ScreenBuddy* Buddy, IMFTransform* Decoder, IMFTransform* Converter)
+static bool Buddy_ResetDecoder(ScreenBuddy* Buddy, IMFTransform* Decoder)
 {
 	DWORD DecodedIndex = 0;
 	IMFMediaType* DecodedType = NULL;
@@ -1495,7 +1534,7 @@ static bool Buddy_ResetDecoder(ScreenBuddy* Buddy, IMFTransform* Decoder, IMFTra
 	Assert(DecodedType);
 
 	HR(IMFTransform_SetOutputType(Decoder, 0, DecodedType, 0));
-	HR(IMFTransform_SetInputType(Converter, 0, DecodedType, 0));
+	// Direct color conversion - no Converter configuration needed
 	
 	// Use negotiated video configuration from server (or defaults if not received yet)
 	IMFMediaType_SetUINT32(DecodedType, &MF_MT_VIDEO_NOMINAL_RANGE, 
@@ -1519,7 +1558,7 @@ static bool Buddy_ResetDecoder(ScreenBuddy* Buddy, IMFTransform* Decoder, IMFTra
 		IMFMediaType_Release(DecodedType);
 		return false;
 	}
-	HR(IMFTransform_SetOutputType(Converter, 0, OutputType, 0));
+	// Direct color conversion - no Converter output type needed
 
 	IMFMediaType_Release(DecodedType);
 	IMFMediaType_Release(OutputType);
@@ -1550,22 +1589,7 @@ static bool Buddy_CreateDecoder(ScreenBuddy* Buddy)
 	}
 	CoTaskMemFree(Activate);
 
-	IMFTransform* Converter;
-	HRESULT hrConverter = CoCreateInstance(&CLSID_VideoProcessorMFT, NULL, CLSCTX_INPROC_SERVER, &IID_IMFTransform, (void**)&Converter);
-	if (FAILED(hrConverter))
-	{
-		MessageBoxW(Buddy->DialogWindow, L"Cannot create video converter for decoder!\n\nPlease ensure Media Foundation is properly installed.", L"Error", MB_ICONERROR);
-		IMFTransform_Release(Decoder);
-		return false;
-	}
-
-	{
-		IMFAttributes* Attributes;
-		HR(IMFTransform_GetAttributes(Converter, &Attributes));
-		HR(IMFAttributes_SetUINT32(Attributes, &MF_XVP_PLAYBACK_MODE, TRUE));
-		HR(IMFAttributes_SetUINT32(Attributes, &MF_XVP_CALLER_ALLOCATES_OUTPUT, TRUE));
-		IMFAttributes_Release(Attributes);
-	}
+	// Direct color conversion - no Video Processor MFT Converter needed
 	
 	{
 		UINT Token;
@@ -1573,7 +1597,7 @@ static bool Buddy_CreateDecoder(ScreenBuddy* Buddy)
 		HR(MFCreateDXGIDeviceManager(&Token, &Manager));
 		HR(IMFDXGIDeviceManager_ResetDevice(Manager, (IUnknown*)Buddy->Device, Token));
 		HR(IMFTransform_ProcessMessage(Decoder, MFT_MESSAGE_SET_D3D_MANAGER, (ULONG_PTR)Manager));
-		HR(IMFTransform_ProcessMessage(Converter, MFT_MESSAGE_SET_D3D_MANAGER, (ULONG_PTR)Manager));
+		// Direct color conversion - no Converter to set D3D manager on
 		IMFDXGIDeviceManager_Release(Manager);
 	}
 
@@ -1600,7 +1624,7 @@ static bool Buddy_CreateDecoder(ScreenBuddy* Buddy)
 	HR(IMFTransform_SetInputType(Decoder, 0, InputType, 0));
 	IMFMediaType_Release(InputType);
 
-	if (!Buddy_ResetDecoder(Buddy, Decoder, Converter))
+	if (!Buddy_ResetDecoder(Buddy, Decoder))
 	{
 		Assert(0);
 	}
@@ -1610,18 +1634,16 @@ static bool Buddy_CreateDecoder(ScreenBuddy* Buddy)
 	HR(IMFTransform_GetOutputStreamInfo(Decoder, 0, &OutputInfo));
 	Assert(OutputInfo.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES);
 
-	HR(IMFTransform_GetOutputStreamInfo(Converter, 0, &OutputInfo));
-	Buddy->DecodeConverterInfo = OutputInfo;
-	Assert((OutputInfo.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) == 0);
+	// Direct color conversion - no Converter stream info needed
 
 	HR(IMFTransform_ProcessMessage(Decoder, MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0));
-	HR(IMFTransform_ProcessMessage(Converter, MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0));
+	// Direct color conversion - no Converter to start
 
 	Buddy->DecodeInputExpected = 0;
 	Buddy->DecodeInputBuffer = NULL;
 	Buddy->DecodeOutputSample = NULL;
 	Buddy->Codec = Decoder;
-	Buddy->Converter = Converter;
+	// Direct color conversion - no Converter needed
 
 	return true;
 }
@@ -1672,6 +1694,12 @@ static void Buddy_OutputFromEncoder(ScreenBuddy* Buddy)
 	static int s_FrameCount = 0;
 	static DWORD s_LastLogTime = 0;
 	static size_t s_BytesSentSinceLog = 0;
+	
+	if (s_FrameCount <= 5 || (GetTickCount() - s_LastLogTime) >= 1000)  // Log first 5 frames and every second
+	{
+		LOG_INFO("Buddy_OutputFromEncoder: Processing encoded frames (FrameCount=%d)", s_FrameCount);
+		s_LastLogTime = GetTickCount();
+	}
 	
 	DWORD Status;
 	MFT_OUTPUT_DATA_BUFFER Output = { .pSample = NULL };
@@ -1733,6 +1761,11 @@ static void Buddy_OutputFromEncoder(ScreenBuddy* Buddy)
 	DWORD OriginalSize = OutputSize;
 	int ChunkCount = 0;
 	
+	if (s_FrameCount <= 5 || (GetTickCount() - s_LastLogTime) >= 1000)
+	{
+		LOG_INFO("Sending encoded frame #%d, Size=%u bytes", s_FrameCount, OriginalSize);
+	}
+	
 	while (OutputSize != 0)
 	{
 		if (ExtraSize)
@@ -1775,12 +1808,17 @@ static void Buddy_OutputFromEncoder(ScreenBuddy* Buddy)
 	IMFSample_Release(OutputSample);
 }
 
+static void Buddy_RenderWindow(ScreenBuddy* Buddy); // Forward declaration
+
 static void Buddy_Decode(ScreenBuddy* Buddy, IMFMediaBuffer* InputBuffer)
 {
+	LOG_INFO("Buddy_Decode: Starting decode of video frame");
+
 	IMFSample* InputSample;
 	HR(MFCreateSample(&InputSample));
 	HR(IMFSample_AddBuffer(InputSample, InputBuffer));
 
+	LOG_INFO("Buddy_Decode: Created input sample, calling ProcessInput");
 	HR(IMFTransform_ProcessInput(Buddy->Codec, 0, InputSample, 0));
 	IMFSample_Release(InputSample);
 
@@ -1790,10 +1828,12 @@ static void Buddy_Decode(ScreenBuddy* Buddy, IMFMediaBuffer* InputBuffer)
 		DWORD Status;
 		MFT_OUTPUT_DATA_BUFFER Output = { .pSample = NULL };
 
+		LOG_INFO("Buddy_Decode: Calling ProcessOutput");
 		HRESULT hr = IMFTransform_ProcessOutput(Buddy->Codec, 0, 1, &Output, &Status);
 		if (hr == MF_E_TRANSFORM_STREAM_CHANGE)
 		{
-			Buddy_ResetDecoder(Buddy, Buddy->Codec, Buddy->Converter);
+			LOG_INFO("Buddy_Decode: Stream change detected, resetting decoder");
+			Buddy_ResetDecoder(Buddy, Buddy->Codec);
 
 			if (Buddy->DecodeOutputSample)
 			{
@@ -1804,14 +1844,22 @@ static void Buddy_Decode(ScreenBuddy* Buddy, IMFMediaBuffer* InputBuffer)
 		}
 		else if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT)
 		{
+			LOG_INFO("Buddy_Decode: Need more input, breaking");
 			break;
 		}
-		HR(hr);
+		else if (FAILED(hr))
+		{
+			LOG_ERROR("Buddy_Decode: ProcessOutput failed with HRESULT 0x%08X", hr);
+			break;
+		}
 
+		LOG_INFO("Buddy_Decode: Got decoded sample, processing");
 		IMFSample* DecodedSample = Output.pSample;
 
 		if (Buddy->DecodeOutputSample == NULL)
 		{
+			LOG_RENDER("[DECODE] ==== FIRST DECODE - Creating output texture ====");
+
 			IMFMediaBuffer* DecodedBuffer;
 			HR(IMFSample_GetBufferByIndex(DecodedSample, 0, &DecodedBuffer));
 
@@ -1827,10 +1875,13 @@ static void Buddy_Decode(ScreenBuddy* Buddy, IMFMediaBuffer* InputBuffer)
 			int DecodedWidth = DecodedDesc.Width;
 			int DecodedHeight = DecodedDesc.Height;
 
+			LOG_RENDER("[DECODE] Decoded NV12 texture: %dx%d, format=%d", DecodedWidth, DecodedHeight, DecodedDesc.Format);
+
 			ID3D11Texture2D_Release(DecodedTexture);
 			IMFDXGIBuffer_Release(DxgiBuffer);
 			IMFMediaBuffer_Release(DecodedBuffer);
 
+			LOG_RENDER("[DECODE] Creating ARGB32 texture for rendering: %dx%d", DecodedWidth, DecodedHeight);
 			D3D11_TEXTURE2D_DESC TextureDesc =
 			{
 				.Width = DecodedWidth,
@@ -1845,46 +1896,89 @@ static void Buddy_Decode(ScreenBuddy* Buddy, IMFMediaBuffer* InputBuffer)
 			};
 
 			ID3D11Texture2D* Texture;
-			ID3D11Device_CreateTexture2D(Buddy->Device, &TextureDesc, NULL, &Texture);
+			HRESULT hrTex = ID3D11Device_CreateTexture2D(Buddy->Device, &TextureDesc, NULL, &Texture);
+			if (FAILED(hrTex))
+			{
+				LOG_RENDER_ERROR("[DECODE] CreateTexture2D FAILED: 0x%08X", hrTex);
+				return;
+			}
+			LOG_RENDER("[DECODE] ARGB32 texture created successfully: %p", Texture);
 
 			if (Buddy->InputView)
 			{
+				LOG_RENDER("[DECODE] Releasing old InputView: %p", Buddy->InputView);
 				ID3D11ShaderResourceView_Release(Buddy->InputView);
 			}
-			ID3D11Device_CreateShaderResourceView(Buddy->Device, (ID3D11Resource*)Texture, NULL, &Buddy->InputView);
+			HRESULT hrSRV = ID3D11Device_CreateShaderResourceView(Buddy->Device, (ID3D11Resource*)Texture, NULL, &Buddy->InputView);
+			if (FAILED(hrSRV))
+			{
+				LOG_RENDER_ERROR("[DECODE] CreateShaderResourceView FAILED: 0x%08X", hrSRV);
+				ID3D11Texture2D_Release(Texture);
+				return;
+			}
+			LOG_RENDER("[DECODE] InputView created successfully: %p", Buddy->InputView);
+
+			// Store the texture reference so we can keep it alive
+			if (Buddy->InputTexture)
+			{
+				LOG_RENDER("[DECODE] Releasing old InputTexture: %p", Buddy->InputTexture);
+				ID3D11Texture2D_Release(Buddy->InputTexture);
+			}
+			Buddy->InputTexture = Texture;
+			LOG_RENDER("[DECODE] InputTexture stored: %p", Buddy->InputTexture);
 
 			Buddy->InputMipsGenerated = false;
 			Buddy->InputWidth = DecodedWidth;
 			Buddy->InputHeight = DecodedHeight;
-
-			//
-
-			IMFMediaBuffer* OutputBuffer;
-			HR(MFCreateDXGISurfaceBuffer(&IID_ID3D11Texture2D, (IUnknown*)Texture, 0, FALSE, &OutputBuffer));
-
-			DWORD OutputLength;
-			HR(IMFMediaBuffer_GetMaxLength(OutputBuffer, &OutputLength));
-			HR(IMFMediaBuffer_SetCurrentLength(OutputBuffer, OutputLength));
-
-			HR(MFCreateSample(&Buddy->DecodeOutputSample));
-			HR(IMFSample_AddBuffer(Buddy->DecodeOutputSample, OutputBuffer));
-
-			HR(IMFSample_SetSampleDuration(Buddy->DecodeOutputSample, 10 * 1000 * 1000 / BUDDY_ENCODE_FRAMERATE));
-			HR(IMFSample_SetSampleTime(Buddy->DecodeOutputSample, 0));
-
-			IMFMediaBuffer_Release(OutputBuffer);
-			ID3D11Texture2D_Release(Texture);
 		}
 
-		HR(IMFTransform_ProcessInput(Buddy->Converter, 0, DecodedSample, 0));
-		IMFSample_Release(DecodedSample);
-
-		MFT_OUTPUT_DATA_BUFFER ConverterOutput = { .pSample = Buddy->DecodeOutputSample };
-		if (!Buddy_GetConverterOutput(Buddy->Converter, NULL, &Buddy->DecodeConverterInfo,
-			Buddy->InputWidth * Buddy->InputHeight * 4, "Decode Converter", &ConverterOutput))
+		// Direct color conversion: NV12 -> ARGB32
+		// Get NV12 data from decoded sample
+		IMFMediaBuffer* NV12Buffer;
+		HR(IMFSample_GetBufferByIndex(DecodedSample, 0, &NV12Buffer));
+		
+		BYTE* NV12Data;
+		HR(IMFMediaBuffer_Lock(NV12Buffer, &NV12Data, NULL, NULL));
+		
+		// Create temporary system-memory buffer for conversion
+		size_t ArgbSize = (size_t)Buddy->InputWidth * Buddy->InputHeight * 4;
+		uint8_t* ArgbData = (uint8_t*)malloc(ArgbSize);
+		if (!ArgbData)
 		{
-			break;
+			LOG_ERROR("Buddy_Decode: Failed to allocate ARGB buffer!");
+			IMFMediaBuffer_Unlock(NV12Buffer);
+			IMFMediaBuffer_Release(NV12Buffer);
+			IMFSample_Release(DecodedSample);
+			return;
 		}
+		
+		// Convert NV12 -> ARGB32 in CPU memory
+		ConvertNV12ToARGB32(NV12Data, ArgbData, Buddy->InputWidth, Buddy->InputHeight);
+		
+		// Copy converted data to GPU texture using UpdateSubresource
+		ID3D11DeviceContext* Context;
+		Buddy->Device->lpVtbl->GetImmediateContext(Buddy->Device, &Context);
+		
+		D3D11_BOX Box = {
+			.left = 0,
+			.top = 0,
+			.front = 0,
+			.right = Buddy->InputWidth,
+			.bottom = Buddy->InputHeight,
+			.back = 1
+		};
+		
+		int RowPitch = Buddy->InputWidth * 4;  // ARGB32 is 4 bytes per pixel
+		Context->lpVtbl->UpdateSubresource(Context, (ID3D11Resource*)Buddy->InputTexture, 0, &Box, ArgbData, RowPitch, 0);
+		Context->lpVtbl->Flush(Context);
+		Context->lpVtbl->Release(Context);
+		
+		// Clean up
+		free(ArgbData);
+		IMFMediaBuffer_Unlock(NV12Buffer);
+		IMFMediaBuffer_Release(NV12Buffer);
+		
+		IMFSample_Release(DecodedSample);
 
 		NewFrameDecoded = true;
 		Buddy->InputMipsGenerated = false;
@@ -1892,7 +1986,17 @@ static void Buddy_Decode(ScreenBuddy* Buddy, IMFMediaBuffer* InputBuffer)
 
 	if (NewFrameDecoded)
 	{
-		InvalidateRect(Buddy->MainWindow, NULL, FALSE);
+		LOG_RENDER("[DECODE] ==== Frame decoded successfully ====");
+		LOG_RENDER("[DECODE]   Size: %dx%d, InputView=%p", Buddy->InputWidth, Buddy->InputHeight, Buddy->InputView);
+		LOG_RENDER("[DECODE] Calling Buddy_RenderWindow to display frame");
+		
+		Buddy_RenderWindow(Buddy);
+		
+		LOG_RENDER("[DECODE] Buddy_RenderWindow returned");
+	}
+	else
+	{
+		LOG_INFO("Buddy_Decode: No new frame decoded this call");
 	}
 }
 
@@ -1904,7 +2008,7 @@ static void Buddy_OnFrameCapture(ScreenCapture* Capture, bool Closed)
 	CaptureCallbackCount++;
 	if (CaptureCallbackCount <= 10 || CaptureCallbackCount % 100 == 0)
 	{
-		LOG_DEBUG("Buddy_OnFrameCapture callback #%u, State=%d, Closed=%d", CaptureCallbackCount, Buddy->State, Closed);
+		LOG_INFO("Buddy_OnFrameCapture callback #%u, State=%d, Closed=%d", CaptureCallbackCount, Buddy->State, Closed);
 	}
 
 	if (Buddy->State != BUDDY_STATE_SHARING)
@@ -1957,7 +2061,7 @@ static void Buddy_OnFrameCapture(ScreenCapture* Capture, bool Closed)
 		FrameCount++;
 		if (FrameCount <= 5 || FrameCount % 60 == 0)
 		{
-			LOG_DEBUG("Frame captured #%u, Time=%llu, EncodeNextTime=%llu", FrameCount, Frame.Time, Buddy->EncodeNextTime);
+			LOG_INFO("Frame captured #%u, Time=%llu, EncodeNextTime=%llu", FrameCount, Frame.Time, Buddy->EncodeNextTime);
 		}
 		
 		if (Frame.Time > Buddy->EncodeNextTime)
@@ -1966,7 +2070,7 @@ static void Buddy_OnFrameCapture(ScreenCapture* Capture, bool Closed)
 			QueuedFrameCount++;
 			if (QueuedFrameCount <= 10 || QueuedFrameCount % 60 == 0)
 			{
-				LOG_DEBUG("Queueing frame #%u for encoding (EncodeQueueWrite=%u, EncodeQueueRead=%u)", 
+				LOG_INFO("Queueing frame #%u for encoding (EncodeQueueWrite=%u, EncodeQueueRead=%u)", 
 				         QueuedFrameCount, Buddy->EncodeQueueWrite, Buddy->EncodeQueueRead);
 			}
 			
@@ -2003,104 +2107,120 @@ static void Buddy_OnFrameCapture(ScreenCapture* Capture, bool Closed)
 				}
 				Buddy->EncodeNextTime = Frame.Time + Buddy->Freq / BUDDY_ENCODE_FRAMERATE;
 
-				IMFMediaBuffer* InputBuffer;
-				HRESULT hr = MFCreateDXGISurfaceBuffer(&IID_ID3D11Texture2D, (IUnknown*)Frame.Texture, 0, FALSE, &InputBuffer);
+				// Windows Graphics Capture textures are GPU-only and cannot be directly mapped.
+				// We need to copy the frame texture to a CPU-readable staging texture first.
+				
+				ID3D11DeviceContext* Context;
+				Buddy->Device->lpVtbl->GetImmediateContext(Buddy->Device, &Context);
+				
+				// Get the frame texture description
+				ID3D11Texture2D* FrameTexture = (ID3D11Texture2D*)Frame.Texture;
+				D3D11_TEXTURE2D_DESC FrameDesc;
+				FrameTexture->lpVtbl->GetDesc(FrameTexture, &FrameDesc);
+				
+				// Create a staging texture for CPU read access
+				D3D11_TEXTURE2D_DESC StagingDesc = {
+					.Width = FrameDesc.Width,
+					.Height = FrameDesc.Height,
+					.MipLevels = 1,
+					.ArraySize = 1,
+					.Format = FrameDesc.Format, // Should be DXGI_FORMAT_B8G8R8A8_UNORM
+					.SampleDesc = { 1, 0 },
+					.Usage = D3D11_USAGE_STAGING,
+					.BindFlags = 0,
+					.CPUAccessFlags = D3D11_CPU_ACCESS_READ,
+					.MiscFlags = 0
+				};
+				
+				ID3D11Texture2D* StagingTexture;
+				HRESULT hr = Buddy->Device->lpVtbl->CreateTexture2D(Buddy->Device, &StagingDesc, NULL, &StagingTexture);
 				if (FAILED(hr))
 				{
-					LOG_ERROR("MFCreateDXGISurfaceBuffer failed: 0x%08X", hr);
-					if (ConvertedSample) IMFSample_Release(ConvertedSample);
+					LOG_ERROR("Failed to create staging texture: 0x%08X", hr);
+					IMFSample_Release(ConvertedSample);
 					ScreenCapture_ReleaseFrame(&Buddy->Capture, &Frame);
-					return;
-				}
-
-				DWORD InputBufferLength;
-				hr = IMFMediaBuffer_GetMaxLength(InputBuffer, &InputBufferLength);
-				if (FAILED(hr))
-				{
-					LOG_ERROR("IMFMediaBuffer_GetMaxLength failed: 0x%08X", hr);
-					IMFMediaBuffer_Release(InputBuffer);
-					if (ConvertedSample) IMFSample_Release(ConvertedSample);
-					ScreenCapture_ReleaseFrame(&Buddy->Capture, &Frame);
+					Context->lpVtbl->Release(Context);
 					return;
 				}
 				
-				hr = IMFMediaBuffer_SetCurrentLength(InputBuffer, InputBufferLength);
+				// Copy the frame texture to the staging texture
+				Context->lpVtbl->CopyResource(Context, (ID3D11Resource*)StagingTexture, (ID3D11Resource*)FrameTexture);
+				
+				// Now map the staging texture
+				D3D11_MAPPED_SUBRESOURCE Mapped;
+				hr = Context->lpVtbl->Map(Context, (ID3D11Resource*)StagingTexture, 0, D3D11_MAP_READ, 0, &Mapped);
 				if (FAILED(hr))
 				{
-					LOG_ERROR("IMFMediaBuffer_SetCurrentLength failed: 0x%08X", hr);
-					IMFMediaBuffer_Release(InputBuffer);
-					if (ConvertedSample) IMFSample_Release(ConvertedSample);
+					LOG_ERROR("Failed to map staging texture: 0x%08X", hr);
+					StagingTexture->lpVtbl->Release(StagingTexture);
+					IMFSample_Release(ConvertedSample);
 					ScreenCapture_ReleaseFrame(&Buddy->Capture, &Frame);
-					return;
-				}
-
-				IMFSample* InputSample;
-				hr = MFCreateSample(&InputSample);
-				if (FAILED(hr))
-				{
-					LOG_ERROR("MFCreateSample failed: 0x%08X", hr);
-					IMFMediaBuffer_Release(InputBuffer);
-					if (ConvertedSample) IMFSample_Release(ConvertedSample);
-					ScreenCapture_ReleaseFrame(&Buddy->Capture, &Frame);
+					Context->lpVtbl->Release(Context);
 					return;
 				}
 				
-				hr = IMFSample_AddBuffer(InputSample, InputBuffer);
-				IMFMediaBuffer_Release(InputBuffer);
+				// Get the NV12 buffer from the sample
+				IMFMediaBuffer* NV12Buffer;
+				hr = IMFSample_GetBufferByIndex(ConvertedSample, 0, &NV12Buffer);
 				if (FAILED(hr))
 				{
-					LOG_ERROR("IMFSample_AddBuffer failed: 0x%08X", hr);
-					IMFSample_Release(InputSample);
-					if (ConvertedSample) IMFSample_Release(ConvertedSample);
+					LOG_ERROR("Failed to get NV12 buffer: 0x%08X", hr);
+					Context->lpVtbl->Unmap(Context, (ID3D11Resource*)Frame.Texture, 0);
+					IMFSample_Release(ConvertedSample);
 					ScreenCapture_ReleaseFrame(&Buddy->Capture, &Frame);
+					Context->lpVtbl->Release(Context);
 					return;
 				}
-
-				hr = IMFSample_SetSampleTime(InputSample, MFllMulDiv(Frame.Time - Buddy->EncodeFirstTime, 10 * 1000 * 1000, Buddy->Freq, 0));
+				
+				BYTE* NV12Data;
+				hr = IMFMediaBuffer_Lock(NV12Buffer, &NV12Data, NULL, NULL);
+				if (FAILED(hr))
+				{
+					LOG_ERROR("Failed to lock NV12 buffer: 0x%08X", hr);
+					IMFMediaBuffer_Release(NV12Buffer);
+					Context->lpVtbl->Unmap(Context, (ID3D11Resource*)Frame.Texture, 0);
+					IMFSample_Release(ConvertedSample);
+					ScreenCapture_ReleaseFrame(&Buddy->Capture, &Frame);
+					Context->lpVtbl->Release(Context);
+					return;
+				}
+				
+				// Log texture mapping details
+				static uint32_t s_StrideLogCount = 0;
+				s_StrideLogCount++;
+				if (s_StrideLogCount <= 3)
+				{
+					LOG_INFO("Texture mapping: Width=%d, Height=%d, RowPitch=%u, Expected=%d", 
+					         Buddy->EncodeWidth, Buddy->EncodeHeight, Mapped.RowPitch, Buddy->EncodeWidth * 4);
+				}
+				
+				// Perform direct ARGB32 -> NV12 conversion with correct stride
+				ConvertARGB32ToNV12((const uint8_t*)Mapped.pData, NV12Data, Buddy->EncodeWidth, Buddy->EncodeHeight, Mapped.RowPitch);
+				
+				// Unlock buffers
+				IMFMediaBuffer_Unlock(NV12Buffer);
+				IMFMediaBuffer_Release(NV12Buffer);
+				Context->lpVtbl->Unmap(Context, (ID3D11Resource*)StagingTexture, 0);
+				StagingTexture->lpVtbl->Release(StagingTexture);
+				Context->lpVtbl->Release(Context);
+				
+				// Set sample timing
+				hr = IMFSample_SetSampleTime(ConvertedSample, MFllMulDiv(Frame.Time - Buddy->EncodeFirstTime, 10 * 1000 * 1000, Buddy->Freq, 0));
 				if (FAILED(hr))
 				{
 					LOG_ERROR("IMFSample_SetSampleTime failed: 0x%08X", hr);
-					IMFSample_Release(InputSample);
-					if (ConvertedSample) IMFSample_Release(ConvertedSample);
+					IMFSample_Release(ConvertedSample);
 					ScreenCapture_ReleaseFrame(&Buddy->Capture, &Frame);
 					return;
 				}
 				
-				hr = IMFSample_SetSampleDuration(InputSample, 10 * 1000 * 1000 / BUDDY_ENCODE_FRAMERATE);
+				hr = IMFSample_SetSampleDuration(ConvertedSample, 10 * 1000 * 1000 / BUDDY_ENCODE_FRAMERATE);
 				if (FAILED(hr))
 				{
 					LOG_ERROR("IMFSample_SetSampleDuration failed: 0x%08X", hr);
-					IMFSample_Release(InputSample);
-					if (ConvertedSample) IMFSample_Release(ConvertedSample);
+					IMFSample_Release(ConvertedSample);
 					ScreenCapture_ReleaseFrame(&Buddy->Capture, &Frame);
 					return;
-				}
-
-				hr = IMFTransform_ProcessInput(Buddy->Converter, 0, InputSample, 0);
-				IMFSample_Release(InputSample);
-				if (FAILED(hr))
-				{
-					LOG_ERROR("IMFTransform_ProcessInput failed: 0x%08X", hr);
-					if (ConvertedSample) IMFSample_Release(ConvertedSample);
-					ScreenCapture_ReleaseFrame(&Buddy->Capture, &Frame);
-					return;
-				}
-
-				MFT_OUTPUT_DATA_BUFFER Output = { .pSample = ConvertedSample };
-				if (!Buddy_GetConverterOutput(Buddy->Converter, Buddy->EncodeSampleAllocator, &Buddy->EncodeConverterInfo,
-				    Buddy->EncodeWidth * Buddy->EncodeHeight * 3 / 2, "Encode Converter", &Output))
-				{
-					if (ConvertedSample) IMFSample_Release(ConvertedSample);
-					if (Output.pSample && Output.pSample != ConvertedSample) IMFSample_Release(Output.pSample);
-					ScreenCapture_ReleaseFrame(&Buddy->Capture, &Frame);
-					return;
-				}
-
-				// If converter provided its own sample, use that instead
-				if (Output.pSample != ConvertedSample)
-				{
-					if (ConvertedSample) IMFSample_Release(ConvertedSample);
-					ConvertedSample = Output.pSample;
 				}
 
 				if (Buddy->EncodeQueueWrite - Buddy->EncodeQueueRead != BUDDY_ENCODE_QUEUE_SIZE)
@@ -2130,6 +2250,15 @@ static void Buddy_OnFrameCapture(ScreenCapture* Capture, bool Closed)
 			}
 		}
 		ScreenCapture_ReleaseFrame(&Buddy->Capture, &Frame);
+	}
+	else
+	{
+		static int s_NoFrameCount = 0;
+		s_NoFrameCount++;
+		if (s_NoFrameCount <= 5 || s_NoFrameCount % 60 == 0)
+		{
+			LOG_INFO("ScreenCapture_GetFrame returned false #%d - no frame available", s_NoFrameCount);
+		}
 	}
 }
 
@@ -2207,8 +2336,12 @@ void Buddy_ShowMessage(ScreenBuddy* Buddy, const wchar_t* Message)
 	{
 		ID3D11ShaderResourceView_Release(Buddy->InputView);
 	}
+	if (Buddy->InputTexture)
+	{
+		ID3D11Texture2D_Release(Buddy->InputTexture);
+	}
 	ID3D11Device_CreateShaderResourceView(Buddy->Device, (ID3D11Resource*)Texture, NULL, &Buddy->InputView);
-	ID3D11Texture2D_Release(Texture);
+	Buddy->InputTexture = Texture;
 
 	DeleteObject(Bitmap);
 	DeleteObject(Font);
@@ -2228,6 +2361,7 @@ static void Buddy_CreateRendering(ScreenBuddy* Buddy, HWND Window)
 	Buddy->InputHeight = 0;
 	Buddy->OutputWidth = 0;
 	Buddy->OutputHeight = 0;
+	Buddy->InputTexture = NULL;
 	Buddy->InputView = NULL;
 	Buddy->OutputView = NULL;
 }
@@ -2239,6 +2373,12 @@ static void Buddy_ReleaseRendering(ScreenBuddy* Buddy)
 	if (Buddy->InputView)
 	{
 		ID3D11ShaderResourceView_Release(Buddy->InputView);
+		Buddy->InputView = NULL;
+	}
+	if (Buddy->InputTexture)
+	{
+		ID3D11Texture2D_Release(Buddy->InputTexture);
+		Buddy->InputTexture = NULL;
 	}
 	if (Buddy->OutputView)
 	{
@@ -2253,14 +2393,29 @@ static void Buddy_ReleaseRendering(ScreenBuddy* Buddy)
 
 static void Buddy_RenderWindow(ScreenBuddy* Buddy)
 {
+	static int s_RenderCallCount = 0;
+	s_RenderCallCount++;
+	
+	LOG_RENDER("[RENDER] ==== Buddy_RenderWindow call #%d ====", s_RenderCallCount);
+	
 	RECT ClientRect;
 	GetClientRect(Buddy->MainWindow, &ClientRect);
 
 	int WindowWidth = ClientRect.right - ClientRect.left;
 	int WindowHeight = ClientRect.bottom - ClientRect.top;
 
+	LOG_RENDER("[RENDER] Window: %dx%d, Input: %dx%d", WindowWidth, WindowHeight, Buddy->InputWidth, Buddy->InputHeight);
+	LOG_RENDER("[RENDER] InputView=%p, OutputView=%p, Device=%p", Buddy->InputView, Buddy->OutputView, Buddy->Device);
+
 	if (WindowWidth == 0 || WindowHeight == 0)
 	{
+		LOG_RENDER("[RENDER] Window has zero size, skipping render");
+		return;
+	}
+	
+	if (!Buddy->InputView)
+	{
+		LOG_RENDER_ERROR("[RENDER] InputView is NULL - cannot render!");
 		return;
 	}
 
@@ -2280,10 +2435,29 @@ static void Buddy_RenderWindow(ScreenBuddy* Buddy)
 
 	if (Buddy->OutputView == NULL)
 	{
+		LOG_RENDER("[RENDER] OutputView is NULL - creating from swapchain buffer");
 		ID3D11Texture2D* OutputTexture;
-		HR(IDXGISwapChain1_GetBuffer(Buddy->SwapChain, 0, &IID_ID3D11Texture2D, (void**)&OutputTexture));
-		ID3D11Device_CreateRenderTargetView(Buddy->Device, (ID3D11Resource*)OutputTexture, NULL, &Buddy->OutputView);
+		HRESULT hrGetBuffer = IDXGISwapChain1_GetBuffer(Buddy->SwapChain, 0, &IID_ID3D11Texture2D, (void**)&OutputTexture);
+		if (FAILED(hrGetBuffer))
+		{
+			LOG_RENDER_ERROR("[RENDER] GetBuffer FAILED: 0x%08X", hrGetBuffer);
+			return;
+		}
+		LOG_RENDER("[RENDER] Got buffer texture: %p", OutputTexture);
+		
+		HRESULT hrRTV = ID3D11Device_CreateRenderTargetView(Buddy->Device, (ID3D11Resource*)OutputTexture, NULL, &Buddy->OutputView);
+		if (FAILED(hrRTV))
+		{
+			LOG_RENDER_ERROR("[RENDER] CreateRenderTargetView FAILED: 0x%08X", hrRTV);
+			ID3D11Texture2D_Release(OutputTexture);
+			return;
+		}
+		LOG_RENDER("[RENDER] OutputView created successfully: %p", Buddy->OutputView);
 		ID3D11Texture2D_Release(OutputTexture);
+	}
+	else
+	{
+		LOG_RENDER("[RENDER] OutputView already exists: %p", Buddy->OutputView);
 	}
 
 	Assert(Buddy->InputView != NULL);
@@ -2349,6 +2523,9 @@ static void Buddy_RenderWindow(ScreenBuddy* Buddy)
 		Data[1] = (float)H / WindowHeight;
 		Data[2] = (float)X / WindowWidth;
 		Data[3] = (float)Y / WindowHeight;
+		
+		LOG_RENDER("[RENDER] ConstantBuffer: Size(%.2f,%.2f) Offset(%.2f,%.2f) Window=%dx%d Output=%dx%d",
+			Data[0], Data[1], Data[2], Data[3], WindowWidth, WindowHeight, OutputWidth, OutputHeight);
 	}
 	ID3D11DeviceContext_Unmap(Context, (ID3D11Resource*)Buddy->ConstantBuffer, 0);
 
@@ -2356,19 +2533,45 @@ static void Buddy_RenderWindow(ScreenBuddy* Buddy)
 	{
 		.Width = (float)WindowWidth,
 		.Height = (float)WindowHeight,
+		.MinDepth = 0.0f,
+		.MaxDepth = 1.0f,
+		.TopLeftX = 0.0f,
+		.TopLeftY = 0.0f,
 	};
 
+	LOG_RENDER("[RENDER] Setting up pipeline state...");
+	LOG_RENDER("[RENDER]   Viewport: %.0fx%.0f", Viewport.Width, Viewport.Height);
+	LOG_RENDER("[RENDER]   VS=%p, PS=%p, Sampler=%p", Buddy->VertexShader, Buddy->PixelShader, Buddy->SamplerState);
+	
 	ID3D11DeviceContext_ClearState(Context);
+	
+	// CRITICAL: Clear render target before drawing
+	float ClearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+	ID3D11DeviceContext_ClearRenderTargetView(Context, Buddy->OutputView, ClearColor);
+	LOG_RENDER("[RENDER] Cleared render target");
+	
 	ID3D11DeviceContext_IASetPrimitiveTopology(Context, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
 	ID3D11DeviceContext_VSSetConstantBuffers(Context, 0, 1, &Buddy->ConstantBuffer);
 	ID3D11DeviceContext_VSSetShader(Context, Buddy->VertexShader, NULL, 0);
 	ID3D11DeviceContext_RSSetViewports(Context, 1, &Viewport);
 	ID3D11DeviceContext_PSSetShaderResources(Context, 0, 1, &Buddy->InputView);
+	ID3D11DeviceContext_PSSetSamplers(Context, 0, 1, &Buddy->SamplerState);
 	ID3D11DeviceContext_PSSetShader(Context, Buddy->PixelShader, NULL, 0);
 	ID3D11DeviceContext_OMSetRenderTargets(Context, 1, &Buddy->OutputView, NULL);
+	
+	LOG_RENDER("[RENDER] Drawing quad (4 vertices)...");
 	ID3D11DeviceContext_Draw(Context, 4, 0);
-
-	HR(IDXGISwapChain1_Present(Buddy->SwapChain, 0, 0));
+	
+	LOG_RENDER("[RENDER] Presenting to screen...");
+	HRESULT hrPresent = IDXGISwapChain1_Present(Buddy->SwapChain, 0, 0);
+	if (FAILED(hrPresent))
+	{
+		LOG_RENDER_ERROR("[RENDER] Present FAILED: 0x%08X", hrPresent);
+	}
+	else
+	{
+		LOG_RENDER("[RENDER] Frame presented successfully");
+	}
 }
 
 static bool Buddy_GetMousePosition(ScreenBuddy* Buddy, Buddy_MousePacket* Packet, int X, int Y)
@@ -2446,7 +2649,7 @@ static void Buddy_UpdateState(ScreenBuddy* Buddy, BuddyState NewState)
 static void Buddy_StopDecoder(ScreenBuddy* Buddy)
 {
 	IMFTransform_Release(Buddy->Codec);
-	IMFTransform_Release(Buddy->Converter);
+	// Direct color conversion - no Converter to release
 
 	if (Buddy->DecodeInputBuffer)
 	{
@@ -2475,7 +2678,7 @@ static void Buddy_StopSharing(ScreenBuddy* Buddy)
 	}
 
 	IMFTransform_Release(Buddy->Codec);
-	IMFTransform_Release(Buddy->Converter);
+	// Direct color conversion - no Converter to release
 	IMFVideoSampleAllocatorEx_Release(Buddy->EncodeSampleAllocator);
 
 	ScreenCapture_Release(&Buddy->Capture);
@@ -3395,7 +3598,7 @@ static bool Buddy_StartSharing(ScreenBuddy* Buddy)
 					IMFShutdown_Release(Shutdown);
 				}
 				IMFTransform_Release(Buddy->Codec);
-				IMFTransform_Release(Buddy->Converter);
+				// Direct color conversion - no Converter to release
 				IMFVideoSampleAllocatorEx_Release(Buddy->EncodeSampleAllocator);
 			}
 		}
@@ -3520,6 +3723,29 @@ static bool Buddy_StartConnection(ScreenBuddy* Buddy)
 	ID3D11Device_CreateVertexShader(Buddy->Device, ScreenBuddyVS, sizeof(ScreenBuddyVS), NULL, &Buddy->VertexShader);
 	ID3D11Device_CreatePixelShader(Buddy->Device, ScreenBuddyPS, sizeof(ScreenBuddyPS), NULL, &Buddy->PixelShader);
 
+	// Create sampler state for texture sampling in pixel shader
+	LOG_RENDER("[INIT] Creating sampler state for texture sampling...");
+	D3D11_SAMPLER_DESC SamplerDesc =
+	{
+		.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR,
+		.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP,
+		.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP,
+		.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP,
+		.MaxAnisotropy = 1,
+		.ComparisonFunc = D3D11_COMPARISON_NEVER,
+		.MinLOD = 0,
+		.MaxLOD = D3D11_FLOAT32_MAX,
+	};
+	HRESULT hrSampler = ID3D11Device_CreateSamplerState(Buddy->Device, &SamplerDesc, &Buddy->SamplerState);
+	if (FAILED(hrSampler))
+	{
+		LOG_RENDER_ERROR("[INIT] CreateSamplerState FAILED: 0x%08X", hrSampler);
+	}
+	else
+	{
+		LOG_RENDER("[INIT] SamplerState created successfully: %p", Buddy->SamplerState);
+	}
+
 	IDXGIDevice* DxgiDevice;
 	IDXGIAdapter* DxgiAdapter;
 	IDXGIFactory2* DxgiFactory;
@@ -3537,7 +3763,16 @@ static bool Buddy_StartConnection(ScreenBuddy* Buddy)
 		.Scaling = DXGI_SCALING_NONE,
 		.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD,
 	};
-	HR(IDXGIFactory2_CreateSwapChainForHwnd(DxgiFactory, (IUnknown*)Buddy->Device, Buddy->MainWindow, &Desc, NULL, NULL, &Buddy->SwapChain));
+	LOG_RENDER("[INIT] Creating swap chain...");
+	HRESULT hrSwapChain = IDXGIFactory2_CreateSwapChainForHwnd(DxgiFactory, (IUnknown*)Buddy->Device, Buddy->MainWindow, &Desc, NULL, NULL, &Buddy->SwapChain);
+	if (FAILED(hrSwapChain))
+	{
+		LOG_RENDER_ERROR("[INIT] CreateSwapChainForHwnd FAILED: 0x%08X", hrSwapChain);
+	}
+	else
+	{
+		LOG_RENDER("[INIT] SwapChain created successfully: %p", Buddy->SwapChain);
+	}
 	HR(IDXGIFactory2_MakeWindowAssociation(DxgiFactory, Buddy->MainWindow, DXGI_MWA_NO_ALT_ENTER));
 
 	IDXGIFactory2_Release(DxgiFactory);
@@ -3656,6 +3891,7 @@ static void Buddy_NetworkEvent(ScreenBuddy* Buddy)
 
 						Assert(Buddy->DecodeInputBuffer == NULL);
 						HR(MFCreateMemoryBuffer(Buddy->DecodeInputExpected, &Buddy->DecodeInputBuffer));
+						LOG_INFO("Client: Starting to receive video frame, expected size: %u bytes", Buddy->DecodeInputExpected);
 					}
 
 					Assert(Buddy->DecodeInputBuffer);
@@ -3675,6 +3911,7 @@ static void Buddy_NetworkEvent(ScreenBuddy* Buddy)
 
 					if (BufferLength == Buddy->DecodeInputExpected)
 					{
+						LOG_INFO("Client: Complete video frame received (%u bytes), starting decode", Buddy->DecodeInputExpected);
 						Buddy_Decode(Buddy, Buddy->DecodeInputBuffer);
 
 						IMFMediaBuffer_Release(Buddy->DecodeInputBuffer);
@@ -3765,6 +4002,23 @@ static void Buddy_NetworkEvent(ScreenBuddy* Buddy)
 				LOG_INFO("User accepted connection - starting screen share");
 				Buddy->RemoteKey = RecvKey;
 
+				// Send video configuration to the newly connected viewer
+				uint8_t ConfigPacket[1 + sizeof(BuddyVideoConfig)];
+				ConfigPacket[0] = BUDDY_PACKET_VIDEO_CONFIG;
+				CopyMemory(&ConfigPacket[1], &Buddy->VideoConfig, sizeof(BuddyVideoConfig));
+				if (!DerpNet_Send(&Buddy->Net, &Buddy->RemoteKey, ConfigPacket, sizeof(ConfigPacket)))
+				{
+					LOG_ERROR("Failed to send video configuration to viewer");
+					Buddy_CancelWait(Buddy);
+					DerpNet_Close(&Buddy->Net);
+					Buddy_StopSharing(Buddy);
+					Buddy_UpdateState(Buddy, BUDDY_STATE_INITIAL);
+					break;
+				}
+				LOG_INFO("Sent video configuration to viewer: YUV Matrix=%d, Range=%d, Primaries=%d, Transfer=%d",
+					Buddy->VideoConfig.yuv_matrix, Buddy->VideoConfig.nominal_range,
+					Buddy->VideoConfig.primaries, Buddy->VideoConfig.transfer_function);
+
 				// Stop timeout timer - connection accepted
 				KillTimer(Buddy->DialogWindow, BUDDY_SHARE_TIMEOUT_TIMER);
 				Buddy->ShareTimeoutActive = false;
@@ -3779,6 +4033,7 @@ static void Buddy_NetworkEvent(ScreenBuddy* Buddy)
 
 				// Start frame capture timer (30fps = ~33ms)
 				SetTimer(Buddy->DialogWindow, BUDDY_FRAME_TIMER, 33, NULL);
+				LOG_INFO("Frame capture timer started (33ms intervals)");
 
 				Buddy_UpdateState(Buddy, BUDDY_STATE_SHARING);
 				LOG_INFO("State updated to SHARING - Now streaming video!");
@@ -4446,6 +4701,12 @@ static INT_PTR CALLBACK Buddy_DialogProc(HWND Dialog, UINT Message, WPARAM WPara
 			// Poll for frames when sharing
 			if (Buddy->State == BUDDY_STATE_SHARING)
 			{
+				static int s_FrameTimerCount = 0;
+				s_FrameTimerCount++;
+				if (s_FrameTimerCount <= 5 || s_FrameTimerCount % 60 == 0)
+				{
+					LOG_INFO("Frame timer fired #%d, calling Buddy_OnFrameCapture", s_FrameTimerCount);
+				}
 				Buddy_OnFrameCapture(&Buddy->Capture, false);
 			}
 		}
@@ -5050,8 +5311,8 @@ int WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR cmdline, int cmdshow)
 	
 	ZeroMemory(Buddy, sizeof(*Buddy));
 	
-	// Initialize logging system first
-	Log_Init();
+	// Initialize logging system first with defaults
+	Log_Init(NULL, NULL);
 	LOG_INFO("========================================");
 	LOG_INFO("ScreenBuddy Starting - %s", BUDDY_VERSION_STRING);
 	LOG_INFO("========================================");
@@ -5091,6 +5352,13 @@ int WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR cmdline, int cmdshow)
 
 	Buddy_LoadConfig(Buddy);
 	LOG_INFO("Configuration loaded");
+	
+// Re-initialize logging with user's log directory and format
+    if (Buddy->Config.log_filename_format[0] != L'\0' || Buddy->Config.log_directory[0] != L'\0') {
+        Log_Init(Buddy->Config.log_directory, Buddy->Config.log_filename_format);
+        LOG_INFO("Logging re-initialized with config: dir=%ls, format=%ls", 
+                 Buddy->Config.log_directory, Buddy->Config.log_filename_format);
+	}
 
 	{
 		UINT Flags = D3D11_CREATE_DEVICE_VIDEO_SUPPORT;

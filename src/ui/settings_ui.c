@@ -35,6 +35,7 @@ void Log_WriteW(LogLevel level, const char* func, int line, const wchar_t* fmt, 
 #define IDC_LOG_DIR_EDIT        1012
 #define IDC_LOG_DIR_BROWSE      1013
 #define IDC_CONFIG_PATH_EDIT    1014
+#define IDC_LOG_FORMAT_EDIT     1015
 
 // Dialog state - holds config pointer and tracks if user made changes
 typedef struct {
@@ -67,6 +68,7 @@ static void LoadControlsFromConfig(HWND hwnd, const BuddyConfig* cfg) {
     
     // File paths
     SetDlgItemTextW(hwnd, IDC_LOG_DIR_EDIT, cfg->log_directory);
+    SetDlgItemTextW(hwnd, IDC_LOG_FORMAT_EDIT, cfg->log_filename_format);
     
     // Show config file path (read-only)
     SettingsState* state = (SettingsState*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
@@ -160,6 +162,18 @@ static BOOL SaveControlsToConfig(HWND hwnd, BuddyConfig* cfg) {
     }
     lstrcpynW(cfg->log_directory, logDir, MAX_PATH);
     LOG_UI_INFO("Log directory set to: '%ls'", cfg->log_directory);
+    
+    // Log filename format
+    wchar_t logFormat[256] = {0};
+    GetDlgItemTextW(hwnd, IDC_LOG_FORMAT_EDIT, logFormat, 256);
+    LOG_UI_INFO("Log filename format read: '%ls'", logFormat);
+    if (wcslen(logFormat) == 0) {
+        LOG_UI_ERROR("Log filename format validation FAILED: empty");
+        MessageBoxW(hwnd, L"Log filename format cannot be empty.", L"Validation Error", MB_OK | MB_ICONERROR);
+        return FALSE;
+    }
+    lstrcpynW(cfg->log_filename_format, logFormat, 256);
+    LOG_UI_INFO("Log filename format set to: '%ls'", cfg->log_filename_format);
     
     LOG_UI_INFO("SaveControlsToConfig SUCCESS");
     return TRUE;

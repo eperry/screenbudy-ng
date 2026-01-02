@@ -33,13 +33,15 @@ static void write_json(FILE* f, const BuddyConfig* cfg) {
     char utf8_derp_server[512] = {0};
     char utf8_release_key[64] = {0};
     char utf8_log_directory[MAX_PATH * 3] = {0};
+    char utf8_log_filename_format[512] = {0};
     char utf8_derp_regions[16][512] = {{0}};
     WideCharToMultiByte(CP_UTF8, 0, cfg->derp_server, -1, utf8_derp_server, sizeof(utf8_derp_server), NULL, NULL);
     WideCharToMultiByte(CP_UTF8, 0, cfg->release_key, -1, utf8_release_key, sizeof(utf8_release_key), NULL, NULL);
     WideCharToMultiByte(CP_UTF8, 0, cfg->log_directory, -1, utf8_log_directory, sizeof(utf8_log_directory), NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, cfg->log_filename_format, -1, utf8_log_filename_format, sizeof(utf8_log_filename_format), NULL, NULL);
     for (int i = 0; i < 16; i++) {
         if (cfg->derp_regions[i][0] != 0) {
-            WideCharToMultiByte(CP_UTF8, 0, cfg->derp_regions[i], -1, utf8_derp_regions[i], sizeof(utf8_derp_regions[i]), NULL, NULL);
+            WideCharToMultiByte(CP_UTF8, 0, cfg->derp_regions[i], -1, utf8_derp_regions[i], 512, NULL, NULL);
         }
     }
     fprintf(f, "{\n");
@@ -55,6 +57,7 @@ static void write_json(FILE* f, const BuddyConfig* cfg) {
     fprintf(f, "  \"derp_region\": %d,\n", cfg->derp_region);
     fprintf(f, "  \"capture_full_screen\": %s,\n", cfg->capture_full_screen ? "true" : "false");
     fprintf(f, "  \"log_directory\": \"%s\",\n", utf8_log_directory);
+    fprintf(f, "  \"log_filename_format\": \"%s\",\n", utf8_log_filename_format);
     fprintf(f, "  \"derp_private_key_hex\": \"%s\",\n", cfg->derp_private_key_hex);
     fprintf(f, "  \"derp_regions\": [\n");
     bool first = true;
@@ -82,12 +85,18 @@ void BuddyConfig_Defaults(BuddyConfig* cfg) {
     cfg->derp_region = 0;
     cfg->capture_full_screen = true;
     
-    // Default log directory: %AppData%\ScreenBuddy\Logs
-    PWSTR appdata = NULL;
-    if (SUCCEEDED(SHGetKnownFolderPath(&FOLDERID_RoamingAppData, 0, NULL, &appdata))) {
-        swprintf_s(cfg->log_directory, MAX_PATH, L"%ls\\ScreenBuddy\\Logs", appdata);
-        CoTaskMemFree(appdata);
+    // Default log directory: app launch directory
+    DWORD pathLen = GetModuleFileNameW(NULL, cfg->log_directory, MAX_PATH);
+    if (pathLen > 0) {
+        wchar_t* LastSlash = wcsrchr(cfg->log_directory, L'\\');
+        if (LastSlash) *LastSlash = L'\0';
+    } else {
+        lstrcpyW(cfg->log_directory, L".");
     }
+    
+    // Default log filename format with date, time, and process ID tokens
+    lstrcpyW(cfg->log_filename_format, L"{appname}-{date}_{time}.log");
+    
     // derp_regions and derp_private_key_hex start empty
 }
 
@@ -293,6 +302,13 @@ bool BuddyConfig_Load(BuddyConfig* cfg, const wchar_t* path) {
         const JsonHSTRING* hs = (const JsonHSTRING*)s;
         lstrcpynW(cfg->log_directory, hs->Ptr, MAX_PATH);
         LOG_CONFIG_INFO("  log_directory: %ls", cfg->log_directory);
+    }
+
+    s = JsonObject_GetString(root, JsonCSTR("log_filename_format"));
+    if (s) {
+        const JsonHSTRING* hs = (const JsonHSTRING*)s;
+        lstrcpynW(cfg->log_filename_format, hs->Ptr, 256);
+        LOG_CONFIG_INFO("  log_filename_format: %ls", cfg->log_filename_format);
     }
 
     // DERP region settings

@@ -18,6 +18,7 @@ typedef struct {
     char derp_private_key_hex[1024]; // Encrypted private key (hex string, needs space for encrypted blob)
     bool capture_full_screen; // Capture full screen or specific window
     wchar_t log_directory[MAX_PATH]; // Directory for log files (default: app directory)
+    wchar_t log_filename_format[256]; // Log filename format with tokens: {date}, {time}, {pid}, {appname}
 } BuddyConfig;
 
 // Populate defaults (safe values)

@@ -23,5 +23,7 @@ SamplerState LinearSampler : register(s0);
 
 float3 PS(in float4 Position : SV_Position, in float2 TexCoord : TEXCOORD) : SV_TARGET
 {
-	return Texture.Sample(LinearSampler, TexCoord).rgb;
+	// Sample the decoded video texture and display it
+	float4 textureColor = Texture.Sample(LinearSampler, TexCoord);
+	return textureColor.rgb;
 }
